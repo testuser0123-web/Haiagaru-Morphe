@@ -21,8 +21,7 @@ public final class ProgrammableNg {
     static final String PREFS = "haiagaru.programmable-ng.v1";
     private static Context context;
     private static volatile boolean enabled;
-    private static volatile NgScriptEngine titleEngine = new NgScriptEngine("");
-    private static volatile NgScriptEngine bodyEngine = new NgScriptEngine("");
+    private static volatile NgRules rules = new NgRules(Collections.emptyList());
     private static final Map<Object, Set<Integer>> responseMatches = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<String, NgScriptEngine.Input> threads = Collections.synchronizedMap(
             new LinkedHashMap<String, NgScriptEngine.Input>(128, .75f, true) {
@@ -46,16 +45,20 @@ public final class ProgrammableNg {
     static void reload() {
         if (context == null) return;
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        titleEngine = new NgScriptEngine(prefs.getString("title", ""));
-        bodyEngine = new NgScriptEngine(prefs.getString("body", ""));
+        try { rules = readRules(prefs); }
+        catch (IllegalArgumentException e) { enabled = false; responseMatches.clear(); report(e); return; }
         enabled = prefs.getBoolean("enabled", false);
         responseMatches.clear();
         hookError = "";
     }
+    static NgRules readRules(SharedPreferences prefs) {
+        return prefs.contains("rules.v2") ? NgRules.decode(prefs.getString("rules.v2", ""))
+                : NgRules.legacy(prefs.getString("title", ""), prefs.getString("body", ""));
+    }
     public static void addSettingsButton(LinearLayout parent, Activity activity) {
         if (context == null) return;
         Button button = new Button(activity);
-        button.setText("プログラマブルNG（191 dev・エッヂ）");
+        button.setText("プログラマブルNG（191 dev）");
         button.setOnClickListener(view -> NgSettings.show(activity));
         parent.addView(button);
     }
@@ -65,10 +68,7 @@ public final class ProgrammableNg {
     private static String boardUrl(Object urlInfo) throws ReflectiveOperationException {
         return (String) urlInfo.getClass().getMethod("i").invoke(urlInfo);
     }
-    private static boolean edge(String board) {
-        return board != null && board.matches("https?://bbs\\.eddibb\\.cc(?::(?:80|443))?/liveedge/?");
-    }
-    private static String key(String board, long id) { return board + "#" + id; }
+    private static String key(String board, long id) { return NgRules.boardKey(board) + "#" + id; }
     private static void report(Exception e) {
         hookError = "191 devとの接続に失敗：" + e.getClass().getSimpleName() + ": " + e.getMessage();
         Log.w("HaiagaruNG", "Programmable NG hook failed", e);
@@ -81,7 +81,7 @@ public final class ProgrammableNg {
             Object urlInfo = field(fragment, "e");
             if (urlInfo == null) return candidates;
             String board = boardUrl(urlInfo);
-            if (!edge(board)) return candidates;
+            if (NgRules.boardKey(board) == null) return candidates;
             long now = System.currentTimeMillis();
             List<NgScriptEngine.Input> inputs = new ArrayList<>();
             for (Object row : candidates) {
@@ -94,7 +94,7 @@ public final class ProgrammableNg {
             }
             lastTitles = inputs;
             if (!enabled) return candidates;
-            boolean[] results = titleEngine.evaluate(inputs);
+            boolean[] results = rules.evaluate(inputs);
             ArrayList<Object> kept = new ArrayList<>();
             ArrayList<Object> excluded = new ArrayList<>();
             for (int i = 0; i < candidates.size(); i++) {
@@ -116,7 +116,7 @@ public final class ProgrammableNg {
             Object urlInfo = field(state, "f");
             if (urlInfo == null) return;
             String board = boardUrl(urlInfo);
-            if (!edge(board)) return;
+            if (NgRules.boardKey(board) == null) return;
             Number idValue = (Number) field(urlInfo, "e");
             if (idValue == null) return;
             long id = idValue.longValue();
@@ -145,7 +145,7 @@ public final class ProgrammableNg {
             }
             lastBodies = inputs;
             if (!enabled) return;
-            boolean[] matches = bodyEngine.evaluate(inputs);
+            boolean[] matches = rules.evaluate(inputs);
             Set<Integer> matched = new HashSet<>();
             for (int i = 0; i < matches.length; i++) if (matches[i]) matched.add(numbers.get(i));
             responseMatches.put(adapter, matched);
@@ -156,7 +156,7 @@ public final class ProgrammableNg {
 
     /** Combine with the native result; never clears stock NG or overrides NG-off mode. */
     public static int responseFlags(Object adapter, Object response, int original) {
-        if (!enabled || bodyEngine.error() != null) return original;
+        if (!enabled) return original;
         try {
             java.lang.reflect.Field ngEnabled = adapter.getClass().getDeclaredField("p");
             ngEnabled.setAccessible(true);
@@ -167,8 +167,9 @@ public final class ProgrammableNg {
         return original;
     }
     static String status() {
-        return "取得済み：スレ " + lastTitles.size() + "件／レス " + lastBodies.size() + "件\n"
-                + "スレルール：" + (titleEngine.error() == null ? "エラーなし" : titleEngine.error()) + "\n"
-                + "レスルール：" + (bodyEngine.error() == null ? "エラーなし" : bodyEngine.error()) + "\n" + hookError;
+        StringBuilder text = new StringBuilder("取得済み：スレ " + lastTitles.size() + "件／レス " + lastBodies.size() + "件\n");
+        for (NgRules.Rule rule : rules.rules) text.append(rule.name).append(rule.enabled ? "：ON" : "：OFF")
+                .append(rule.engine.error() == null ? "" : "／エラー：" + rule.engine.error()).append("\n");
+        return text + rules.batchError + "\n" + hookError;
     }
 }

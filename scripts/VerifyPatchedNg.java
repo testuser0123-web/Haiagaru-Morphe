@@ -11,10 +11,11 @@ public final class VerifyPatchedNg {
         var container = DexFileFactory.loadDexContainer(new File(args[0]), Opcodes.getDefault());
         String ng = "Lapp/morphe/extension/chmate/ProgrammableNg;";
         Map<String, Integer> hooks = new HashMap<>();
-        boolean rhino = false, settings = false;
+        boolean rhino = false, settings = false, rules = false;
         for (String entry : container.getDexEntryNames()) for (ClassDef c : container.getEntry(entry).getDexFile().getClasses()) {
             rhino |= c.getType().equals("Lorg/mozilla/javascript/Interpreter;");
             settings |= c.getType().equals("Lapp/morphe/extension/chmate/NgSettings;");
+            rules |= c.getType().equals("Lapp/morphe/extension/chmate/NgRules;");
             for (Method method : c.getMethods()) {
                 if (method.getImplementation() == null) continue;
                 List<Instruction> instructions = new ArrayList<>();
@@ -48,7 +49,7 @@ public final class VerifyPatchedNg {
                 }
             }
         }
-        check(rhino && settings, "missing engine/settings");
+        check(rhino && settings && rules, "missing engine/settings/rules");
         check(hooks.getOrDefault("filterThreads", 0) == 1, "title hook count");
         check(hooks.getOrDefault("prepareResponses", 0) == 1, "response batch hook count");
         check(hooks.getOrDefault("responseFlags", 0) == 2, "response return hook count");

@@ -1,11 +1,12 @@
 ## このフォークの追加機能
 
-ChMate 0.8.10.191 dev / エッヂ向けのプログラマブルNGを追加しています。
+ChMate 0.8.10.191 dev向けのプログラマブルNGを追加しています。
+名前付き複数ルール・個別ON/OFF・ルールごとの対象板指定（複数URLまたは全板）に対応しています。
 スレ立て時刻・勢い・記者IDをJavaScriptの条件式に渡せます。
 **実機動作は未検証の試用版です。** Android 8.0以降が対象です。
 
 - [導入方法・引数・制約・ビルド手順](docs/programmable-ng-191.md)
-- [検証済みの試作MPPをダウンロード](https://github.com/testuser0123-web/Haiagaru-Morphe/raw/refs/heads/master/dist/haiagaru-ng191-0.1.mpp)
+- [検証済みの試作MPPをダウンロード](https://github.com/testuser0123-web/Haiagaru-Morphe/raw/refs/heads/master/dist/haiagaru-ng191-0.2.mpp)
 
 以下は上流プロジェクトの説明です。
 
