@@ -23,13 +23,9 @@ public final class NgMetadata {
         options.put("target", "title");
         options.put("boardUrl", boardUrl);
         options.put("threadId", id > 0 ? id : null);
-        // Only known Unix-second key families supply dates; unknown boards retain text filtering.
-        String host = "";
-        try { host = new java.net.URI(boardUrl).getHost().toLowerCase(java.util.Locale.ROOT); } catch (Exception ignored) {}
-        boolean timestampKey = edge || host.equals("5ch.net") || host.endsWith(".5ch.net")
-                || host.equals("2ch.sc") || host.endsWith(".2ch.sc")
-                || host.equals("bbspink.com") || host.endsWith(".bbspink.com");
-        Long created = timestampKey && id > 0 && id <= 8_640_000_000_000L ? id * 1000 : null;
+        // ChMate 191's common subject list uses SubjectTxtItem.e as Unix seconds
+        // on every board. BBSThread.c(long) excludes special keys >= 9240000000.
+        Long created = id > 0 && id < 9_240_000_000L ? id * 1000 : null;
         options.put("createdAtMs", created);
         options.put("resCount", count != null && count >= 0 ? count : null);
         options.put("speed", created != null && nowMs > created && count != null && count >= 0

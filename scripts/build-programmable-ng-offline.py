@@ -66,14 +66,14 @@ for part in ['extension', 'patch']:
          '--lib', tools / 'android35.jar', *extra, '--output', work / (part + '-dex'), *inputs)
     if len(list((work / (part + '-dex')).glob('*.dex'))) != 1:
         raise SystemExit('Expected a single DEX for ' + part)
-output = out / 'haiagaru-ng191-0.2.mpp'
+output = out / 'haiagaru-ng191-0.3.mpp'
 with zipfile.ZipFile(tools / 'haiagaru-base.mpp') as base, zipfile.ZipFile(work / 'patch-classes.jar') as classes, zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as z:
     for name in base.namelist():
         if name.endswith('.class') or name in ['classes.dex', 'extensions/chmate.mpe', 'META-INF/MANIFEST.MF']:
             continue
         z.writestr(name, base.read(name))
     manifest = base.read('META-INF/MANIFEST.MF').decode().replace('Name: Haiagaru', 'Name: Haiagaru NG191 (experimental)')
-    manifest = manifest.replace('Version: 1.3.2\r\n', 'Version: 1.3.2-ng191.2\r\n').replace('Patcher-Version: 1.10.0', 'Patcher-Version: 1.14.0')
+    manifest = manifest.replace('Version: 1.3.2\r\n', 'Version: 1.3.2-ng191.3\r\n').replace('Patcher-Version: 1.10.0', 'Patcher-Version: 1.14.0')
     z.writestr('META-INF/MANIFEST.MF', manifest)
     for name in classes.namelist():
         z.writestr(name, classes.read(name))

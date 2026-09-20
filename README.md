@@ -6,7 +6,7 @@ ChMate 0.8.10.191 dev向けのプログラマブルNGを追加しています。
 **実機動作は未検証の試用版です。** Android 8.0以降が対象です。
 
 - [導入方法・引数・制約・ビルド手順](docs/programmable-ng-191.md)
-- [検証済みの試作MPPをダウンロード](https://github.com/testuser0123-web/Haiagaru-Morphe/raw/refs/heads/master/dist/haiagaru-ng191-0.2.mpp)
+- [検証済みの試作MPPをダウンロード](https://github.com/testuser0123-web/Haiagaru-Morphe/raw/refs/heads/master/dist/haiagaru-ng191-0.3.mpp)
 
 以下は上流プロジェクトの説明です。
 
