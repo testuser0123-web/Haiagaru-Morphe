@@ -47,7 +47,7 @@ final class NgSettings {
         Button add=new Button(activity); add.setText("ルールを追加"); layout.addView(add);
         add.setOnClickListener(v->{if(draft.size()>=NgRules.MAX_RULES) status.setText("32件まで登録できます。"); else edit(activity,draft,-1,render[0]);});
         label(layout,"編集後、この画面の「保存」で反映します。保存後は板／スレを再読み込みしてください。\n記者IDはエッヂ専用です。記者ID表示をONにして板を再取得してください。\n取得できない引数はnullです。板の種類によっては未対応の項目があります。");
-        AlertDialog dialog=new AlertDialog.Builder(activity).setTitle("プログラマブルNG v0.4（191 dev）")
+        AlertDialog dialog=new AlertDialog.Builder(activity).setTitle("プログラマブルNG v0.5（191 dev）")
             .setView(scroll(activity,layout)).setNegativeButton("閉じる",null).setPositiveButton("保存",null).create();
         dialog.setOnShowListener(x->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
             boolean saved=prefs.edit().putBoolean("enabled",enabled.isChecked()).putString("rules.v2",new NgRules(draft).encode()).commit();

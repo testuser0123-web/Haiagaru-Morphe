@@ -3231,7 +3231,7 @@ private fun app.morphe.patcher.patch.BytecodePatchContext.patchEdgeReporterHisto
     if (version == "0.8.10.191 dev") {
         mutableClassDefBy("Lo/MaxFullscreenAdImplExternalSyntheticLambda4;").methods.single {
             it.name == "onViewCreated"
-        }.addBeforeEveryReturn("invoke-static {p0, p1}, $runtime->addLegacyButton(Ljava/lang/Object;Landroid/view/View;)V")
+        }.addBeforeEveryReturn("invoke-static {p0}, $runtime->addLegacyButton(Ljava/lang/Object;)V")
     } else {
         val owner = when (version) {
             "0.8.10.226 dev" -> "Lo/getSegmentsokio;"
