@@ -1,0 +1,99 @@
+# プログラマブルNG 191 dev 試作版
+
+Haiagaru-Morphe 1.3.2（基点 e4498cfff7151bd0520cc1a2f5a4a6ed55423cec）への追加です。
+上流の公式リリースではありません。
+フォークのソースには、その後のAndroid 8クラッシュ修正（75bdc34）も維持しています。
+`dist/haiagaru-ng191-0.1.mpp` は上記e4498cfを基点にビルド・検証した試作バイナリです。
+
+## 対象と導入
+
+- ChMate **0.8.10.191 dev**、プログラマブルNG機能は **Android 8.0 / API 26以降**。
+- エッヂ `bbs.eddibb.cc/liveedge` の板一覧とレス本文が対象。他の板には適用しません。
+- `haiagaru-ng191-0.1.mpp` をローカルパッチとしてMorphe Managerへ読み込み、元APKへ `Haiagaru` を適用します。
+- 配布MPPはMorphe Desktop 1.16.0 / Patcher 1.14.0で生成・適用を検証しています。古いManagerでは読めない場合があります。
+- 別アプリとして試す場合は `Change ChMate package name` の `packageName` を `jp.co.airfront.android.a2chMate.ng191`、`appName` を `ChMate NG191` に設定してください。
+- ChMate設定 → Haiagaru → **プログラマブルNG（191 dev・エッヂ）** で編集します。
+- 初期状態は無効。スレ・レスそれぞれ1つの関数を入力でき、複数条件は `||` / `&&` や関数本体で組み合わせます。空欄は無効です。
+- 保存後、板／スレを再読み込みしてください。時間経過だけで自動再判定するタイマーはありません。
+- 記者IDには既存の「エッヂのスレタイ末尾に記者IDを表示」をONにした状態での板再取得が必要です。
+
+## 関数と引数
+
+```js
+(text, { speed, posterId }) =>
+  (speed !== null && speed > 10000) || posterId === '対象のID'
+```
+
+既存の `(text) => ...`、分割代入、デフォルト引数、Date、文字列includes、正規表現が使えます。
+ブラウザのDOM、document、localStorage、fetchはありません。ルールは同期的にtrueかfalseを返します。
+ブラウザ版の設定は自動移行しません。条件の関数をコピーしてください。
+
+| options | 意味 |
+|---|---|
+| target | `title` または `body` |
+| threadId | Unix秒のスレID（数値） |
+| createdAt | JavaScriptのDate、取得できなければnull |
+| createdAtMs | 同日時のUnixミリ秒 |
+| resCount | 板一覧のレス総数。本文を直接開き、一覧データがない場合はnull |
+| speed | `resCount * 86400000 / (判定時刻ms - createdAtMs)`。レス/日。計算できなければnull |
+| posterId | 記者ID。スレ一覧の末尾 `[記者ID★]` から分離。取得できなければnull |
+| boardUrl | 板URL |
+| responseNumber | 本文判定時のレス番号。タイトル判定時はnull |
+| responseId | 本文判定時の投稿者ID（記者IDとは別）。タイトル判定時はnull |
+| threadTitle | 本文判定時のスレタイ |
+| name / mail / dateText | 本文判定時の名前、メール欄、日時ヘッダー |
+
+タイトルのtextから記者ID付加部分を除きます。本文はChMateのDAT本文からHTML装飾を除いた文字列です。
+`speed` はサイト表示の文字列ではなく計算値です。取得・判定時刻の差でサイト表示とずれることがあります。
+
+## 動作・制約
+
+- スレは既存のNGスレ一覧へ振り分けます。既存NG条件も維持します。
+- レスは標準のNGWordフラグを追加します。この版では連鎖NG・透明NGの自動連動は追加しません。
+- 「取得済みデータでテスト／引数を確認」で実際の判定件数と先頭データの引数を表示します。
+- 本文を直接開いた場合、一覧を経由しないためレス総数・勢い・記者IDがnullになり得ます。ダウンロード済みのレス数を総数と誤認しません。
+- エラーになった関数は保存し直すまで停止し、その関数では非表示にしません。
+- 同じ入力へ同じ結果を返す関数を使ってください。判定はメタ情報込みで最大4096件キャッシュします。
+- Rhino 1.8.0のインタープリターを使用し、Javaオブジェクトへの橋渡しを公開しません。
+- 命令数・再帰と250msの実行予算を検査します。ただし組み込みの重い処理・正規表現・大量メモリ確保までハードに停止する別プロセス隔離ではありません。第三者の信用できないコードを実行するための機能ではありません。
+- 大量・複雑なルールは上限に達して停止する可能性があります。
+
+## 検証済み／未検証
+
+検証済み:
+
+- 提供APK（SHA-256 `1075cd57970099d30478badd064a8a7b64bc53e6ec8029cf5f4e7c1d27e41ec4`）のDEX上でフック3箇所・参照フィールドを照合。
+- Java拡張とKotlinパッチのコンパイル、Android用DEX化。
+- Rhino上で分割代入・デフォルト引数・Date・旧1引数ルール・勢い・記者ID・入力別キャッシュ・エラー・無限ループ停止をテスト。
+- Morphe Desktopで `.mpp` 読み込み、上記APKへの適用・再構築。
+- 再構築後DEXにフック・設定導線・JS実行エンジンが含まれることを検査。
+
+**Android端末・エミュレーターでの起動と画面操作は未検証です。試用版であり、動作保証版ではありません。**
+
+## ビルド
+
+通常は上流と同様にJava 21 / Android SDK / GitHub Packagesの読み取り権限を用意し、
+`./gradlew :patches:buildAndroid --no-daemon` を実行します。
+
+この環境ではGitHub Packagesが401を返すため、認証を要しない公開配布物を使用する
+`scripts/build-programmable-ng-offline.py` で作成しました。公開済み1.3.2のMPPから共通パッチ・
+Shizuku拡張・メタデータを継承し、本リポジトリのChMateパッチ全Kotlinソースと
+ChMate拡張全Javaソースを再コンパイルします。元APK・その逆コンパイル物は配布ソースへ含めません。
+
+依存: Rhino 1.8.0（MPL-2.0）、元Haiagaru-MorpheのライセンスはリポジトリのLICENSEを参照。
+
+### オフラインビルドの入力
+
+公開配布物を以下の名前でtoolsディレクトリへ配置します。hiddenapi.jarはAAR内のclasses.jarです。Gradle ZIPはtools/gradleへ展開します。
+
+- [morphe-desktop.jar](https://github.com/MorpheApp/morphe-desktop/releases/download/v1.16.0/morphe-desktop-1.16.0-all.jar) — 配置後ファイルのSHA-256: `82a0df2ff881d83d5ca8b4f9a6ce196bd4ac3b87ff147fe37845c296b436806c`
+- [haiagaru-base.mpp](https://github.com/areteruhiro/Haiagaru-Morphe/releases/download/1.3.2/haiagaru_patches-1.3.2.mpp) — 配置後ファイルのSHA-256: `077f9725addabc0f3734ad59fb610f46f70d5e665655c11947d44dcf22250b44`
+- [rhino.jar](https://repo.maven.apache.org/maven2/org/mozilla/rhino/1.8.0/rhino-1.8.0.jar) — 配置後ファイルのSHA-256: `e7ff37ec00b4c19ea16f42b5b3a601616d559dbb76e65bc9d094bd6bda2a925d`
+- [hiddenapi.jar](https://repo.maven.apache.org/maven2/org/lsposed/hiddenapibypass/hiddenapibypass/6.1/hiddenapibypass-6.1.aar) — 配置後ファイルのSHA-256: `6f50c4d202acb8152901716df3a1f94b2181e33aa0d14c9bdb2579cbc21c0832`
+- [android35.jar](https://raw.githubusercontent.com/Sable/android-platforms/master/android-35/android.jar) — 配置後ファイルのSHA-256: `4566663c3876e022b4fa4ced8c8697c4ab1688267f090114fd92d027b32e619b`
+- [r8.jar](https://dl.google.com/dl/android/maven2/com/android/tools/r8/9.4.24/r8-9.4.24.jar) — 配置後ファイルのSHA-256: `6efd9dacb08001f342d95482ecc15a7b69c634bc261aeb88bbc8e6cd5837f212`
+- [gradle.zip](https://services.gradle.org/distributions/gradle-9.7.1-bin.zip) — 配置後ファイルのSHA-256: `acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a`
+
+```sh
+python3 scripts/build-programmable-ng-offline.py --tools /absolute/path/tools --out /absolute/path/output
+```

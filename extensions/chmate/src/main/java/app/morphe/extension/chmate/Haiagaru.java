@@ -347,6 +347,7 @@ public final class Haiagaru {
         applicationContext = context == null ? application : context;
         runtimePackageName = application.getPackageName();
         applyUserAgent();
+        ProgrammableNg.initialize(application);
     }
 
     private static void initializeApplicationContext(Context context) {
@@ -1462,6 +1463,8 @@ public final class Haiagaru {
         layout.setOrientation(LinearLayout.VERTICAL);
         int padding = dp(activity, 20);
         layout.setPadding(padding, padding, padding, padding);
+
+        ProgrammableNg.addSettingsButton(layout, activity);
 
         Switch hideAd = addSwitch(
                 layout,

@@ -475,7 +475,10 @@ private val haiagaruBytecodePatch = bytecodePatch {
             else -> patchSetTextCalls()
         }
         when (packageMetadata.versionName) {
-            "0.8.10.191 dev" -> EdgeSubjectUrl191Fingerprint.method.rewriteEdgeSubjectUrl()
+            "0.8.10.191 dev" -> {
+                EdgeSubjectUrl191Fingerprint.method.rewriteEdgeSubjectUrl()
+                patchProgrammableNg191()
+            }
             "0.8.10.226 dev" -> EdgeSubjectUrl226Fingerprint.method.rewriteEdgeSubjectUrl()
             "0.8.10.241" -> EdgeSubjectUrl241Fingerprint.method.rewriteEdgeSubjectUrl()
             "0.8.10.243 dev" -> EdgeSubjectUrlFingerprint.method.rewriteEdgeSubjectUrl()

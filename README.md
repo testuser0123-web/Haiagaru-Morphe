@@ -1,3 +1,14 @@
+## このフォークの追加機能
+
+ChMate 0.8.10.191 dev / エッヂ向けのプログラマブルNGを追加しています。
+スレ立て時刻・勢い・記者IDをJavaScriptの条件式に渡せます。
+**実機動作は未検証の試用版です。** Android 8.0以降が対象です。
+
+- [導入方法・引数・制約・ビルド手順](docs/programmable-ng-191.md)
+- [検証済みの試作MPPをダウンロード](https://github.com/testuser0123-web/Haiagaru-Morphe/raw/refs/heads/master/dist/haiagaru-ng191-0.1.mpp)
+
+以下は上流プロジェクトの説明です。
+
 # Haiagaru for Morphe
 
 ChMate `0.8.10.191 dev` / `0.8.10.226 dev` / `0.8.10.241` / `0.8.10.243 dev` 対応のMorpheパッチです。 <br>
