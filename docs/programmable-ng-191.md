@@ -1,15 +1,14 @@
-# プログラマブルNG 191 dev v0.3 試作版
+# プログラマブルNG 191 dev v0.4 試作版
 
-Haiagaru-Morphe 1.3.2（基点 e4498cfff7151bd0520cc1a2f5a4a6ed55423cec）への追加です。
+Haiagaru-Morphe 1.3.3（上流タグ1.3.3）にプログラマブルNGを統合したフォーク版です。
 上流の公式リリースではありません。
-フォークのソースには、その後のAndroid 8クラッシュ修正（75bdc34）も維持しています。
-v0.3はAndroid 8クラッシュ修正を含めて再ビルドしています。
+Android 8クラッシュ修正と、NG v0.3までの複数ルール・対象板指定・日時取得修正も維持しています。
 
 ## 対象と導入
 
 - ChMate **0.8.10.191 dev**、プログラマブルNG機能は **Android 8.0 / API 26以降**。
 - ChMateの共通スレ一覧・レス表示を対象に、ルールごとに板URLを指定できます。「すべての板」も選べます。板種別ごとの実機互換性は未検証です。
-- `haiagaru-ng191-0.3.mpp` をローカルパッチとしてMorphe Managerへ読み込み、元APKへ `Haiagaru` を適用します。
+- `haiagaru-ng191-0.4.mpp` をローカルパッチとしてMorphe Managerへ読み込み、元APKへ `Haiagaru` を適用します。
 - 配布MPPはMorphe Desktop 1.16.0 / Patcher 1.14.0で生成・適用を検証しています。古いManagerでは読めない場合があります。
 - 別アプリとして試す場合は `Change ChMate package name` の `packageName` を `jp.co.airfront.android.a2chMate.ng191`、`appName` を `ChMate NG191` に設定してください。
 - ChMate設定 → Haiagaru → **プログラマブルNG（191 dev）** で編集します。
@@ -20,6 +19,10 @@ v0.3はAndroid 8クラッシュ修正を含めて再ビルドしています。
 - 個別テストはON/OFFに関係なくそのルールを実行します。最後に開いた板／スレのデータが対象板に一致しない場合はデータ未取得と表示します。
 - 保存後、板／スレを再読み込みしてください。時間経過だけで自動再判定するタイマーはありません。
 - 記者IDには既存の「エッヂのスレタイ末尾に記者IDを表示」をONにした状態での板再取得が必要です。
+
+## v0.4の統合
+
+上流1.3.3の記者ID履歴保持・必死チェッカー補正・広告領域修正等を取り込みました。プログラマブルNGの対応は191 devのみで、上流が対応する他バージョンへは拡張していません。統合版の191 devへの適用・再構築とNG／記者ID履歴の回帰テストを実施。端末での実行は未検証です。
 
 ## v0.3の修正
 
@@ -87,7 +90,7 @@ v0.3はAndroid 8クラッシュ修正を含めて再ビルドしています。
 `./gradlew :patches:buildAndroid --no-daemon` を実行します。
 
 この環境ではGitHub Packagesが401を返すため、認証を要しない公開配布物を使用する
-`scripts/build-programmable-ng-offline.py` で作成しました。公開済み1.3.2のMPPから共通パッチ・
+`scripts/build-programmable-ng-offline.py` で作成しました。公開済み1.3.3のMPPから共通パッチ・
 Shizuku拡張・メタデータを継承し、本リポジトリのChMateパッチ全Kotlinソースと
 ChMate拡張全Javaソースを再コンパイルします。元APK・その逆コンパイル物は配布ソースへ含めません。
 
@@ -98,7 +101,7 @@ ChMate拡張全Javaソースを再コンパイルします。元APK・その逆�
 公開配布物を以下の名前でtoolsディレクトリへ配置します。hiddenapi.jarはAAR内のclasses.jarです。Gradle ZIPはtools/gradleへ展開します。
 
 - [morphe-desktop.jar](https://github.com/MorpheApp/morphe-desktop/releases/download/v1.16.0/morphe-desktop-1.16.0-all.jar) — 配置後ファイルのSHA-256: `82a0df2ff881d83d5ca8b4f9a6ce196bd4ac3b87ff147fe37845c296b436806c`
-- [haiagaru-base.mpp](https://github.com/areteruhiro/Haiagaru-Morphe/releases/download/1.3.2/haiagaru_patches-1.3.2.mpp) — 配置後ファイルのSHA-256: `077f9725addabc0f3734ad59fb610f46f70d5e665655c11947d44dcf22250b44`
+- [haiagaru-base.mpp](https://github.com/areteruhiro/Haiagaru-Morphe/releases/download/1.3.3/haiagaru_patches-1.3.3.mpp) — 配置後ファイルのSHA-256: `17ab9421ab06157defad947125ff4f5d63fa9f7896b05206795e6f45e7a9c3c8`
 - [rhino.jar](https://repo.maven.apache.org/maven2/org/mozilla/rhino/1.8.0/rhino-1.8.0.jar) — 配置後ファイルのSHA-256: `e7ff37ec00b4c19ea16f42b5b3a601616d559dbb76e65bc9d094bd6bda2a925d`
 - [hiddenapi.jar](https://repo.maven.apache.org/maven2/org/lsposed/hiddenapibypass/hiddenapibypass/6.1/hiddenapibypass-6.1.aar) — 配置後ファイルのSHA-256: `6f50c4d202acb8152901716df3a1f94b2181e33aa0d14c9bdb2579cbc21c0832`
 - [android35.jar](https://raw.githubusercontent.com/Sable/android-platforms/master/android-35/android.jar) — 配置後ファイルのSHA-256: `4566663c3876e022b4fa4ced8c8697c4ab1688267f090114fd92d027b32e619b`
