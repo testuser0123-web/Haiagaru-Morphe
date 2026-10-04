@@ -1,4 +1,15 @@
-# プログラマブルNG 191 dev v0.5 試作版
+# プログラマブルNG 191 dev
+
+## 現在のソース
+
+上流1.6.4検証用プレリリースを取り込み、191 dev用の既存ルール・保存形式・設定画面を維持しています。
+上流の「高度なNGルール（条件・スクリプト）」とは独立しており、191 devでは両方のルールが順に適用されます。
+統合版は[`haiagaru-ng191-0.6.mpp`](https://github.com/testuser0123-web/Haiagaru-Morphe/raw/refs/heads/master/dist/haiagaru-ng191-0.6.mpp)です。Morphe Managerにローカルパッチとして読み込んで使用します。
+パッチソースJSONを登録している場合もv0.6に更新されます。既存のルールは「プログラマブルNG（191 dev）」から編集できます。
+[GitHub Actions](https://github.com/testuser0123-web/Haiagaru-Morphe/actions/runs/37178888140)で通常のAndroidビルドが成功し、NGルール・JSエンジン・Talk文字コード・必死チェッカーのリンク処理の回帰テストが通っています。実機起動・画面操作・元APKへの適用は今回未検証です。
+以下のv0.5の配布物・検証記録・オフラインビルド手順は1.3.3ベースの旧版についてのものです。
+
+## v0.5 試作版の記録
 
 Haiagaru-Morphe 1.3.3（上流タグ1.3.3）にプログラマブルNGを統合したフォーク版です。
 上流の公式リリースではありません。

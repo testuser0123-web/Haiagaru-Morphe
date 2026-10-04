@@ -27,3 +27,32 @@ GPLv3 Section 7e: Declining Grant of Trademark Rights
 This License does not grant any rights or permission under trademark law
 to use the name "Morphe" or any of the Program's trade names, trademarks,
 service marks, or logos.
+
+=============
+
+Programmable NG design notice
+
+The programmable NG feature is an independently restructured implementation
+inspired by the GPLv3 fork at:
+
+https://github.com/testuser0123-web/Haiagaru-Morphe
+https://github.com/testuser0123-web
+
+That fork and this project are distributed under GPLv3. Source-level changes
+in this project are identified in the public Git history. No prebuilt artifact
+from that fork is redistributed by this project.
+
+The JavaScript interpreter is Mozilla Rhino 1.8.0, distributed under the
+Mozilla Public License 2.0:
+
+https://github.com/mozilla/rhino
+
+Noto Color Emoji is copyright Google and distributed under the SIL Open Font
+License 1.1. The bundled font comes from googlefonts/noto-emoji commit
+e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e. The complete license is at
+patches/src/main/resources/chmate/emoji/OFL.txt.
+
+MonaLite is a reduced MonaFont-derived font for displaying Japanese ASCII art.
+Its embedded metadata credits the MonaFont contributors and describes the font
+as public domain. The MonaFont project permits modification and redistribution:
+https://monafont.sourceforge.net/index.html
