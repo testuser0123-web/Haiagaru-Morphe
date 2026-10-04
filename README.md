@@ -9,7 +9,10 @@
 191 devでは両方の有効ルールを順に適用します。既存ルールの自動移行は行いません。
 
 - [191 dev用NGの導入方法・引数・制約](docs/programmable-ng-191.md)
-- 既存の`dist/haiagaru-ng191-0.5.mpp`とパッチソースJSONは、1.3.3ベースの旧試作版です。ソース更新だけでは配布MPPは更新されません。
+- [統合版MPP v0.6をダウンロード](https://github.com/testuser0123-web/Haiagaru-Morphe/raw/refs/heads/master/dist/haiagaru-ng191-0.6.mpp)
+- このフォークの更新ソース: [patches-bundle.json](https://raw.githubusercontent.com/testuser0123-web/Haiagaru-Morphe/refs/heads/master/patches-bundle.json)
+- 統合版は`1.6.4-ng191.6`です。[GitHub ActionsのAndroidビルド](https://github.com/testuser0123-web/Haiagaru-Morphe/actions/runs/37178888140)とNG等の回帰テストが成功しています。Android実機での操作は未検証です。
+- 既存の`dist/haiagaru-ng191-0.5.mpp`以前のファイルは、1.3.3ベースの旧試作版です。
 
 以下は上流プロジェクトの説明です。
 
