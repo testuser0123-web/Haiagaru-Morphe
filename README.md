@@ -1,4 +1,17 @@
 
+## 保守終了・アーカイブ
+
+2026年10月4日をもって、このフォークの保守を終了しました。コード・履歴・配布MPPは記録として残しています。
+上流にもプログラマブルNG機能が追加されているため、今後の利用・更新は[上流のHaiagaru-Morphe](https://github.com/areteruhiro/Haiagaru-Morphe)を参照してください。
+
+- [上流の導入・更新手順](https://github.com/areteruhiro/Haiagaru-Morphe#readme)
+- [上流の最新正式リリース](https://github.com/areteruhiro/Haiagaru-Morphe/releases/latest)
+
+このフォークのパッチソースJSONは最終版を指したまま固定され、今後は更新されません。
+このフォーク独自のNGルールは上流版へ自動移行されないため、切り替える場合は必要なルールを控えてください。
+
+以下は最終版の記録です。
+
 ## このフォークの追加機能
 
 ソースは上流の1.6.4検証用プレリリース（`119954fd41fa56e5576e01d3ff4845a7fe0601bf`）へ更新しています。
