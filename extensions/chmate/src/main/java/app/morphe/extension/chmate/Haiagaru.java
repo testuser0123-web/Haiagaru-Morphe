@@ -27,6 +27,10 @@ import android.os.Process;
 import android.preference.PreferenceManager;
 import android.provider.MediaStore;
 import android.net.Uri;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.Log;
@@ -40,6 +44,8 @@ import android.widget.LinearLayout;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.Switch;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -61,6 +67,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.Socket;
+import javax.net.SocketFactory;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -73,15 +82,36 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /** Runtime component of the Haiagaru patch, embedded in ChMate. */
 public final class Haiagaru {
     private static final String LOG_TAG = "Haiagaru";
+    /**
+     * A cellular Network requested for a post must remain requested while the
+     * HTTP client is using its socket.  Releasing the callback immediately
+     * after onAvailable() lets Android tear down the request underneath the
+     * socket and can reproduce "Binding socket to network N failed: EPERM".
+     * ChMate closes its sockets inside generated code, so the extension keeps
+     * the lease for a bounded post window instead of guessing at a close hook.
+     */
+    private static final long CELLULAR_NETWORK_LEASE_MILLIS = 120_000L;
+    private static final Handler CELLULAR_NETWORK_LEASE_HANDLER =
+            new Handler(Looper.getMainLooper());
     private static final Map<Activity, PopupWindow> SETTINGS_BUTTON_POPUPS =
             new WeakHashMap<>();
+    private static final int EDDI_ARCHIVE_TOOLBAR_ID = 0x7e000001;
     private static final String PREFS_NAME =
             "io.github.areteruhiro.chmate.haiagaru.ui-config";
+    private static final String LEGACY_TALK_PREFS_NAME = "talk";
+    private static final String LEGACY_TALK_SESSION_REPAIR_KEY =
+            "legacyTalkSessionRepairLastUpdateV2";
     private static final String BUTTON_TAG = "haiagaru.settings.button";
     private static final String DEFAULT_USER_AGENT =
             "Dalvik/2.1.0 (Linux; U; Android 4.0.3; HT-01 Build/XYZ0.123456.789)";
@@ -95,6 +125,19 @@ public final class Haiagaru {
     private static final String CHMATE_COPIPE_NG_AR_KEY = "copipeNgAR";
     private static final String CHMATE_COPIPE_NG2_KEY = "copipeNg2";
     private static final String CHMATE_ARASHI_NG_KEY = "arashiNg";
+    private static final String NG_REGISTRATION_LIMIT_KEY = "ngRegistrationLimit";
+    private static final String HISSI_CHECKER_MODE_KEY = "hissiCheckerMode";
+    private static final String HISSI_VIEWER_THEME_KEY = "hissiViewerTheme";
+    private static final String HISSI_VIEWER_TEXT_ZOOM_KEY = "hissiViewerTextZoom";
+    private static final String HISSI_VIEWER_FULLSCREEN_KEY = "hissiViewerFullscreen";
+    private static final String HISSI_VIEWER_SWIPE_HISTORY_KEY = "hissiViewerSwipeHistory";
+    private static final String KYODEMO_ENHANCED_VIEWER_KEY = "kyodemoEnhancedViewer";
+    private static final int DEFAULT_NG_REGISTRATION_LIMIT = 300;
+    private static final int MAX_NG_REGISTRATION_LIMIT = 100_000;
+    /** ChMate's own bounded post-history store (postDataList.json). */
+    private static final String CHMATE_POST_DATA_LIST_COUNT_KEY = "postDataListCount";
+    private static final int DEFAULT_CHMATE_POST_DATA_LIST_COUNT = 100;
+    private static final int MAX_CHMATE_POST_DATA_LIST_COUNT = 10_000;
     private static final String ARCHIVE_ROUTE_TEMPLATES_KEY = "archiveRouteTemplates";
     private static final String ARCHIVE_PRESET_MARKER = "【Haiagaru】";
     private static final String ARCHIVE_PRESET_URL =
@@ -117,14 +160,31 @@ public final class Haiagaru {
                     + "dat|https://{$server}.2ch.sc/{$bbs}/dat/{$key}.dat";
     private static final String AD_CLASS_191 = "o.qheCC";
     private static final String AD_CLASS_241 = "o.setUseHandlerThreadForCallbacks";
+    private static final String AD_CLASS_242 = "o.zzbgb";
     private static final String AD_CLASS_243 = "o.zzexb";
     private static final Pattern LEGACY_BE_ATTACHMENT_TOKEN = Pattern.compile(
-            "(?:(?:sssp|https?):)?//img\\.5ch\\.(?:io|net)/ico/[^\\s<\\u0003\\u3000]+"
-                    + "|\\u0003img\\.5ch\\.(?:io|net)/ico/[^\\s<\\u0003\\u3000]+",
+            "(?:(?:sssp|https?):)?//img\\.5ch\\.(?:io|net)/(?:ico|premium)/[^\\s<\\u0003\\u3000]+"
+                    + "|\\u0003img\\.5ch\\.(?:io|net)/(?:ico|premium)/[^\\s<\\u0003\\u3000]+",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern LEGACY_PREMIUM_BE_URL = Pattern.compile(
+            "(?:(?:(?:sssp|https?):)?//|\\u0003)img\\.5ch\\.(?:io|net)/premium/([^\\s<\\u0003\\u3000]+)",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern LEGACY_BE_ICO_URL = Pattern.compile(
+            "(?:(?:(?:sssp|https?):)?//|\\u0003)img\\.5ch\\.(?:io|net)/ico/([^\\s<\\u0003\\u3000]+)",
+            Pattern.CASE_INSENSITIVE
+    );
+    /** Any legacy BE image spelling, used only for duplicate detection. */
+    private static final Pattern LEGACY_BE_ANY_URL = Pattern.compile(
+            "(?:(?:(?:sssp|https?):)?//|\\u0003)img\\.5ch\\.(?:io|net)/(?:premium|ico)/([^\\s<\\u0003\\u3000]+)",
             Pattern.CASE_INSENSITIVE
     );
     private static final Pattern LEGACY_THREAD_READ_PATH = Pattern.compile(
-            "^/test/read\\.cgi/([^/]+)/(\\d{9,10})(?:/.*)?$",
+            // Keep the optional response number separate from any trailing
+            // path.  ChMate uses this suffix to position the thread at the
+            // requested response after an archived DAT has been imported.
+            "^/test/read\\.cgi/([^/]+)/(\\d{9,10})(/\\d+)?(?:/.*)?$",
             Pattern.CASE_INSENSITIVE
     );
     private static final Pattern ITEST_SERVER_THREAD_READ_PATH = Pattern.compile(
@@ -333,21 +393,216 @@ public final class Haiagaru {
         Context context = provider.getContext();
         if (context == null) return;
         initializeApplicationContext(context);
+        EmojiFontFallback.initialize(context);
     }
 
     /** Fallback for processes that do not create ChMate's startup provider. */
     public static void onApplicationPreCreate(Application application) {
         if (application == null) return;
         initializeApplicationContext(application);
+        EmojiFontFallback.initialize(application);
     }
 
     public static void onApplicationCreate(Application application) {
         if (application == null) return;
-        Context context = application.getApplicationContext();
-        applicationContext = context == null ? application : context;
-        runtimePackageName = application.getPackageName();
-        applyUserAgent();
+        // Keep the same process-wide application context used by the provider
+        // hook.  The provider runs before ChMate creates its HTTP clients, so
+        // applying the UA there is required for the first request after restart.
+        initializeApplicationContext(application);
         ProgrammableNg.initialize(application);
+        EmojiFontFallback.register(application);
+        HaiagaruMegaSync.maybeBackupOnStartup(application);
+    }
+
+    /** Adds the archive action to ChMate's own home-toolbar customization model. */
+    public static Object addEdgeArchiveToolbarChoice(Object toolbarModel) {
+        return addToolbarChoice(toolbarModel, EDDI_ARCHIVE_TOOLBAR_ID, "haiagaru_edge_archive");
+    }
+
+    public static boolean compactQuickFilters() {
+        return applicationContext != null
+                && preferences(applicationContext).getBoolean("compactQuickFilters", false);
+    }
+
+    public static Object addQuickFilterToolbarChoice(Object toolbarModel) {
+        // Keep the action in ChMate's toolbar catalog even while the feature is
+        // off, so users of every supported version can add it before enabling it.
+        return addToolbarChoice(toolbarModel, QuickFilterToolbar.ID, "haiagaru_quick_filter");
+    }
+
+    private static Object addToolbarChoice(Object toolbarModel, int actionId, String resourceName) {
+        if (toolbarModel == null) return null;
+        try {
+            Context context = applicationContext;
+            if (context == null) return toolbarModel;
+            int titleId = context.getResources().getIdentifier(
+                    resourceName, "string", context.getPackageName());
+            int iconId = context.getResources().getIdentifier(
+                    resourceName, "drawable", context.getPackageName());
+            if (titleId == 0 || iconId == 0) return toolbarModel;
+            if (toolbarModel instanceof List) {
+                List<?> source = (List<?>) toolbarModel;
+                if (containsToolbarChoice(source, actionId)) return toolbarModel;
+                @SuppressWarnings("unchecked")
+                List<Object> buttons = (List<Object>) source;
+                Class<?> itemClass = Class.forName("o.r8lambda98incQ33GAiiY2082BMi9yDa3l0",
+                        false, toolbarModel.getClass().getClassLoader());
+                Object item = itemClass.getConstructor(int.class, int.class, int.class,
+                        int.class, boolean.class).newInstance(
+                        actionId, iconId, titleId, titleId, false);
+                buttons.add(item);
+                return toolbarModel;
+            }
+
+            Field listField = null;
+            for (Field field : toolbarModel.getClass().getDeclaredFields()) {
+                if (List.class.isAssignableFrom(field.getType())) {
+                    listField = field;
+                    break;
+                }
+            }
+            if (listField == null) return toolbarModel;
+            listField.setAccessible(true);
+            List<?> original = (List<?>) listField.get(toolbarModel);
+            if (original == null || containsToolbarChoice(original, actionId)) return toolbarModel;
+            ArrayList<Object> buttons = new ArrayList<>(original);
+            ClassLoader loader = toolbarModel.getClass().getClassLoader();
+            Class<?> specClass = Class.forName(
+                    "jp.syoboi.a2chMate.feature.toolbar.ToolbarButtonSpec", false, loader);
+            Object item = specClass.getConstructor(int.class, int.class, int.class,
+                    int.class, boolean.class).newInstance(
+                    actionId, iconId, titleId, titleId, false);
+            // Modern ToolbarDefault keeps a mutable button list. Extending that
+            // list preserves its position and configuration objects; rebuilding
+            // the model can silently lose the new choice on some versions.
+            try {
+                @SuppressWarnings("unchecked")
+                List<Object> mutableButtons = (List<Object>) original;
+                mutableButtons.add(item);
+                return toolbarModel;
+            } catch (UnsupportedOperationException ignored) {
+                // Fall through for immutable toolbar catalogs.
+            }
+            buttons.add(item);
+
+            ArrayList<Field> modelFields = new ArrayList<>();
+            for (Field field : toolbarModel.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                        || field == listField) continue;
+                field.setAccessible(true);
+                modelFields.add(field);
+            }
+            java.lang.reflect.Constructor<?> selected = null;
+            for (java.lang.reflect.Constructor<?> constructor
+                    : toolbarModel.getClass().getDeclaredConstructors()) {
+                Class<?>[] parameterTypes = constructor.getParameterTypes();
+                if (parameterTypes.length == modelFields.size() + 1
+                        && List.class.isAssignableFrom(parameterTypes[parameterTypes.length - 1])
+                        && parameterTypes[0] == String.class) {
+                    selected = constructor;
+                    break;
+                }
+            }
+            if (selected == null) return toolbarModel;
+            ArrayList<Object> constructorArgs = new ArrayList<>();
+            Class<?>[] parameterTypes = selected.getParameterTypes();
+            Field titleField = null;
+            for (Field field : modelFields) {
+                if (field.getType() == String.class) {
+                    titleField = field;
+                    break;
+                }
+            }
+            if (titleField == null) return toolbarModel;
+            constructorArgs.add(titleField.get(toolbarModel));
+            ArrayList<Field> remainingFields = new ArrayList<>(modelFields);
+            remainingFields.remove(titleField);
+            for (int parameterIndex = 1; parameterIndex < parameterTypes.length - 1;
+                    parameterIndex++) {
+                Field match = null;
+                for (Field field : remainingFields) {
+                    if (parameterTypes[parameterIndex].isAssignableFrom(field.getType())
+                            || field.getType().isAssignableFrom(parameterTypes[parameterIndex])) {
+                        match = field;
+                        break;
+                    }
+                }
+                if (match == null) return toolbarModel;
+                constructorArgs.add(match.get(toolbarModel));
+                remainingFields.remove(match);
+            }
+            constructorArgs.add(buttons);
+            selected.setAccessible(true);
+            return selected.newInstance(constructorArgs.toArray());
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to add Edge archive toolbar choice", error);
+            return toolbarModel;
+        }
+    }
+
+    private static boolean containsToolbarChoice(List<?> buttons, int actionId) {
+        for (Object button : buttons) {
+            if (button == null) continue;
+            for (Field id : button.getClass().getDeclaredFields()) {
+                if (id.getType() != int.class) continue;
+                try {
+                    id.setAccessible(true);
+                    if (id.getInt(button) == actionId) return true;
+                } catch (Throwable ignored) { }
+            }
+        }
+        return false;
+    }
+
+    /** Handles the custom toolbar item before ChMate dispatches its stock actions. */
+    public static boolean handleEdgeArchiveToolbarClick(Object fragment, int itemId) {
+        if (itemId != EDDI_ARCHIVE_TOOLBAR_ID) return false;
+        try {
+            Activity activity = null;
+            if (fragment instanceof Activity) {
+                activity = (Activity) fragment;
+            } else if (fragment != null) {
+                try {
+                    Object owner = fragment.getClass().getMethod("getActivity").invoke(fragment);
+                    if (owner instanceof Activity) activity = (Activity) owner;
+                } catch (ReflectiveOperationException ignored) {
+                    // Older toolbar dispatchers do not always pass a Fragment.
+                }
+            }
+            Context context = activity != null ? activity : applicationContext;
+            if (context == null) return false;
+            Intent intent = new Intent(context, HissiMenuActivity.class);
+            intent.setAction(Intent.ACTION_VIEW);
+            intent.setData(Uri.parse("https://eddiarchive3rd.boy.jp/"));
+            if (activity == null) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(intent);
+            return true;
+        } catch (Throwable error) {
+            Log.e(LOG_TAG, "Unable to open Edge archive search from ChMate toolbar", error);
+            return false;
+        }
+    }
+
+    /** Applies the bundled emoji fallback while preserving the original text. */
+    public static CharSequence processEmojiText(CharSequence source) {
+        return EmojiFontFallback.processText(source);
+    }
+
+    /** Leaves the editor/history intact and adapts only the outgoing post copy. */
+    public static Object prepareExternalEmojiPost(Object postData) {
+        return ExternalEmojiPost.prepare(postData);
+    }
+
+    /** 191 constructs its outgoing post directly from editor strings. */
+    public static String prepareExternalEmojiBody(String url, String body) {
+        return ExternalEmojiPost.prepareBody(url, body);
+    }
+
+    /** The legacy constructor passes nine adjacent strings; keep a range invoke valid. */
+    public static String prepareExternalEmojiBodyFromPostFields(
+            String url, String first, String second, String third, String body,
+            String fifth, String sixth, String seventh, String eighth) {
+        return ExternalEmojiPost.prepareBody(url, body);
     }
 
     private static void initializeApplicationContext(Context context) {
@@ -355,9 +610,11 @@ public final class Haiagaru {
         Context appContext = resolvedContext == null ? context : resolvedContext;
         applicationContext = appContext;
         EdgeReporterHistory.initialize(appContext);
+        ProgrammableNgController.initialize(appContext);
         runtimePackageName = appContext.getPackageName();
         migrateRestoredPackageReferences(appContext);
         HttpsTransport.setEnabled(preferences(appContext).getBoolean("forceHttps", false));
+        applyUserAgent();
     }
 
     /** Installs the optional crash logger before ChMate's startup provider does any work. */
@@ -481,14 +738,23 @@ public final class Haiagaru {
         writer.flush();
     }
 
+    /** Repairs only the certificate comparison before 242's image upload pipeline. */
+    public static void normalizeImageUploadIntegrity242(Object[] state) {
+        if (state == null || state.length < 2
+                || !(state[0] instanceof int[]) || !(state[1] instanceof int[])) {
+            throw new IllegalStateException("Unexpected ChMate 242 image integrity state");
+        }
+        int[] actual = (int[]) state[0];
+        int[] expected = (int[]) state[1];
+        if (actual.length == 0 || expected.length == 0) {
+            throw new IllegalStateException("Empty ChMate 242 image integrity state");
+        }
+        expected[0] = actual[0];
+    }
+
     /**
-     * Runs the current image uploader after repairing its certificate-derived cache.
-     *
-     * <p>ChMate 0.8.10.243 loads this uploader from an in-memory DEX. Its normal
-     * path compares two cached integers immediately before building the request;
-     * re-signing leaves those values three apart and sends execution into a decoy
-     * allocation whose size is hundreds of megabytes. Repair the cached comparison
-     * value and keep the uploader, response parser, and network behavior unchanged.</p>
+     * Repairs 243's generated uploader cache without changing its request or parser.
+     * A mismatched comparison otherwise enters a decoy allocation of hundreds of MB.
      */
     public static Object invokeCurrentImageUploader(
             Method method,
@@ -821,6 +1087,14 @@ public final class Haiagaru {
         );
     }
 
+    /** Rewrites a stored legacy board-menu endpoint to the canonical 5ch.io host. */
+    public static String rewriteBbsMenuUrl(String original) {
+        if (original == null || !isChtoioEnabled()) return original;
+        return original
+                .replace("https://menu.5ch.net", "https://menu.5ch.io")
+                .replace("http://menu.5ch.net", "https://menu.5ch.io");
+    }
+
     public static String rewrite5chUrl(String original) {
         if (original == null) return null;
         String rewritten = rewriteLegacyTalkBoardResource(original);
@@ -905,6 +1179,290 @@ public final class Haiagaru {
     }
 
     /**
+     * Keeps the 191 downloader on the ordinary DAT reader for Talk URLs.  The
+     * stock type-4 branch invokes a dynamically restored signer; after a
+     * Morphe rebuild that signer is the source of the divide-by-zero trap.
+     * ChMate's URL-info class is app-owned, so use its stable no-arg URL
+     * accessor and the integer transport field reflectively.
+     */
+    public static void normalizeLegacyTalkTransport(Object urlInfo) {
+        if (urlInfo == null) return;
+        try {
+            String url = null;
+            for (String accessor : new String[]{"o", "G", "H", "D"}) {
+                try {
+                    java.lang.reflect.Method method = urlInfo.getClass().getDeclaredMethod(accessor);
+                    if (method.getReturnType() == String.class) {
+                    method.setAccessible(true);
+                    Object value = method.invoke(urlInfo);
+                    if (value instanceof String && ArchivedThreadImporter.isTalkThreadUrl((String) value)) {
+                        url = (String) value;
+                        break;
+                    }
+                    }
+                } catch (NoSuchMethodException ignored) {
+                }
+            }
+            if (url == null) return;
+            for (java.lang.reflect.Field field : urlInfo.getClass().getDeclaredFields()) {
+                if (field.getType() == int.class && (field.getName().equals("g")
+                        || field.getName().equals("type") || field.getName().equals("kind"))) {
+                    field.setAccessible(true);
+                    field.setInt(urlInfo, 1);
+                    return;
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to normalize legacy Talk transport", error);
+        }
+    }
+
+    /**
+     * Creates a socket on the currently usable cellular network. ChMate's
+     * cellular-only client keeps one Network.SocketFactory, but Android 16 can
+     * invalidate that Network while a post is being assembled. Resolve the
+     * network again for every new socket and retry the current candidates before
+     * falling back to ChMate's original factory.
+     */
+    public static Socket createCellularSocket(SocketFactory fallback, String host, int port)
+            throws IOException {
+        if (!isCellularNetworkRefreshEnabled()) return fallback.createSocket(host, port);
+        return createRequestedCellularSocket(host, port, null, 0);
+    }
+
+    public static Socket createCellularSocket(
+            SocketFactory fallback, String host, int port, InetAddress localAddress, int localPort)
+            throws IOException {
+        if (!isCellularNetworkRefreshEnabled()) {
+            return fallback.createSocket(host, port, localAddress, localPort);
+        }
+        return createRequestedCellularSocket(host, port, localAddress, localPort);
+    }
+
+    public static Socket createCellularSocket(
+            SocketFactory fallback, InetAddress address, int port) throws IOException {
+        if (!isCellularNetworkRefreshEnabled()) return fallback.createSocket(address, port);
+        return createRequestedCellularSocket(address, port, null, 0);
+    }
+
+    public static Socket createCellularSocket(
+            SocketFactory fallback, InetAddress address, int port,
+            InetAddress localAddress, int localPort) throws IOException {
+        if (!isCellularNetworkRefreshEnabled()) {
+            return fallback.createSocket(address, port, localAddress, localPort);
+        }
+        return createRequestedCellularSocket(address, port, localAddress, localPort);
+    }
+
+    private static Socket createRequestedCellularSocket(
+            String host, int port, InetAddress localAddress, int localPort) throws IOException {
+        IOException last = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            CellularNetworkLease lease = requestCellularNetwork();
+            if (lease == null) continue;
+            try {
+                Socket socket = localAddress == null
+                        ? lease.network.getSocketFactory().createSocket(host, port)
+                        : lease.network.getSocketFactory().createSocket(
+                                host, port, localAddress, localPort);
+                retainCellularNetworkLease(lease);
+                Log.i(LOG_TAG, "Using requested cellular network " + lease.network
+                        + " for post socket");
+                return socket;
+            } catch (IOException error) {
+                last = error;
+                lease.release();
+                Log.w(LOG_TAG, "Requested cellular network socket failed on attempt "
+                        + (attempt + 1), error);
+            }
+        }
+        throw last != null ? last : new IOException("No cellular network available for post");
+    }
+
+    private static Socket createRequestedCellularSocket(
+            InetAddress address, int port, InetAddress localAddress, int localPort)
+            throws IOException {
+        IOException last = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            CellularNetworkLease lease = requestCellularNetwork();
+            if (lease == null) continue;
+            try {
+                Socket socket = localAddress == null
+                        ? lease.network.getSocketFactory().createSocket(address, port)
+                        : lease.network.getSocketFactory().createSocket(
+                                address, port, localAddress, localPort);
+                retainCellularNetworkLease(lease);
+                Log.i(LOG_TAG, "Using requested cellular network " + lease.network
+                        + " for post socket");
+                return socket;
+            } catch (IOException error) {
+                last = error;
+                lease.release();
+                Log.w(LOG_TAG, "Requested cellular network socket failed on attempt "
+                        + (attempt + 1), error);
+            }
+        }
+        throw last != null ? last : new IOException("No cellular network available for post");
+    }
+
+    private static CellularNetworkLease requestCellularNetwork() {
+        Context context = applicationContext;
+        if (context == null) return null;
+        ConnectivityManager manager = null;
+        CellularNetworkLease lease = null;
+        try {
+            manager = (ConnectivityManager)
+                    context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) return null;
+            CountDownLatch ready = new CountDownLatch(1);
+            Network[] result = new Network[1];
+            ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    result[0] = network;
+                    ready.countDown();
+                }
+
+            };
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    .build();
+            manager.requestNetwork(request, callback);
+            lease = new CellularNetworkLease(manager, callback);
+            if (!ready.await(5L, TimeUnit.SECONDS) || result[0] == null) {
+                lease.release();
+                return null;
+            }
+            lease.network = result[0];
+            return lease;
+        } catch (Throwable error) {
+            if (lease != null) lease.release();
+            Log.w(LOG_TAG, "Unable to request a fresh cellular network", error);
+            return null;
+        }
+    }
+
+    private static void retainCellularNetworkLease(final CellularNetworkLease lease) {
+        CELLULAR_NETWORK_LEASE_HANDLER.postDelayed(
+                lease::release, CELLULAR_NETWORK_LEASE_MILLIS);
+    }
+
+    /** Whether the user enabled the fresh-cellular-network workaround. */
+    public static boolean isCellularNetworkRefreshEnabled() {
+        SharedPreferences preferences = preferencesOrNull();
+        return preferences == null || preferences.getBoolean("refreshCellularNetwork", true);
+    }
+
+    /**
+     * Returns the maximum number of locally persisted NG entries for each
+     * ChMate NG category. Zero means unlimited; the stock value is 300.
+     */
+    public static int getNgRegistrationLimit() {
+        SharedPreferences preferences = preferencesOrNull();
+        if (preferences == null) return DEFAULT_NG_REGISTRATION_LIMIT;
+        int value = preferences.getInt(NG_REGISTRATION_LIMIT_KEY, DEFAULT_NG_REGISTRATION_LIMIT);
+        return value <= 0 ? Integer.MAX_VALUE : Math.min(value, MAX_NG_REGISTRATION_LIMIT);
+    }
+
+    private static final class CellularNetworkLease {
+        private final ConnectivityManager manager;
+        private final ConnectivityManager.NetworkCallback callback;
+        private volatile Network network;
+        private boolean released;
+
+        private CellularNetworkLease(
+                ConnectivityManager manager,
+                ConnectivityManager.NetworkCallback callback) {
+            this.manager = manager;
+            this.callback = callback;
+        }
+
+        private synchronized void release() {
+            if (released) return;
+            released = true;
+            try {
+                manager.unregisterNetworkCallback(callback);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * Repairs the write session left by older 191 patches once, without touching
+     * the rest of ChMate's data.  The stock Talk flow stores a replacement
+     * {@code x-write-key} before showing its confirmation dialog.  If that dialog
+     * is cancelled, the matching one-shot extend token is discarded while the
+     * replacement key remains in {@code talk.xml}.  Every later post then reuses
+     * an impossible key/token pair until all app data is cleared.
+     */
+    public static void prepareLegacyTalkPostSession() {
+        configureLegacyTalkConfirmationParser();
+        Context context = applicationContext;
+        if (context == null) return;
+        SharedPreferences haiagaru = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        long installedAt = 1L;
+        try {
+            PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
+            if (info.lastUpdateTime > 0) installedAt = info.lastUpdateTime;
+        } catch (Throwable ignored) {
+            try {
+                long modified = new File(context.getApplicationInfo().sourceDir).lastModified();
+                if (modified > 0) installedAt = modified;
+            } catch (Throwable ignoredAgain) {
+            }
+        }
+        if (installedAt == haiagaru.getLong(LEGACY_TALK_SESSION_REPAIR_KEY, Long.MIN_VALUE)) return;
+        clearLegacyTalkWriteSession(context);
+        haiagaru.edit()
+                .putLong(LEGACY_TALK_SESSION_REPAIR_KEY, installedAt)
+                .remove("legacyTalkSessionRepairVersionV1")
+                .remove("legacyTalkSessionRepairV1")
+                .commit();
+        Log.i(LOG_TAG, "Repaired legacy Talk write session after APK update");
+    }
+
+    /**
+     * The 0.8.10.191 confirmation-form parser uses `.` without DOTALL for both
+     * the input-tag matcher and attribute-value matcher. A MESSAGE value with
+     * line breaks is therefore silently dropped, so the confirmation POST is
+     * retried without its body and the server shows the cookie confirmation again.
+     */
+    private static void configureLegacyTalkConfirmationParser() {
+        try {
+            Class<?> parser = Class.forName("o.getCredentials");
+            java.lang.reflect.Field[] fields = parser.getDeclaredFields();
+            for (java.lang.reflect.Field field : fields) {
+                if (field.getType() != java.util.regex.Pattern.class) continue;
+                field.setAccessible(true);
+                java.util.regex.Pattern current = (java.util.regex.Pattern) field.get(null);
+                if (current == null || (current.flags() & java.util.regex.Pattern.DOTALL) != 0) continue;
+                field.set(null, java.util.regex.Pattern.compile(
+                        current.pattern(), current.flags() | java.util.regex.Pattern.DOTALL));
+            }
+            Log.i(LOG_TAG, "Enabled multiline parsing for legacy Talk confirmation forms");
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Could not enable multiline parsing for legacy Talk confirmation forms", error);
+        }
+    }
+
+    /** Drops only 191's renewable Talk write credentials after confirmation is cancelled. */
+    public static void resetLegacyTalkPostSession() {
+        Context context = applicationContext;
+        if (context == null) return;
+        clearLegacyTalkWriteSession(context);
+        Log.i(LOG_TAG, "Reset legacy Talk write session after cancelled confirmation");
+    }
+
+    private static void clearLegacyTalkWriteSession(Context context) {
+        context.getSharedPreferences(LEGACY_TALK_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove("talk_write_key")
+                .remove("talk_created")
+                .commit();
+    }
+
+    /**
      * ChMate 0.8.10.191 restores its Talk client into a dedicated in-memory DEX.
      * A certificate-derived comparison in that DEX deliberately divides by zero
      * when the APK is re-signed. Keep the generated request/authentication code,
@@ -912,8 +1470,48 @@ public final class Haiagaru {
      */
     public static void normalizeLegacyTalkAuthIntegrity(Object authClient) {
         if (authClient == null) return;
+        normalizeLegacyTalkAuthIntegrity(authClient.getClass().getClassLoader());
+    }
+
+    /** Invokes the 191 generated Talk authenticator and repairs its refreshed cache once. */
+    public static Object invokeLegacyTalkAuthenticator(
+            java.lang.reflect.Method method,
+            Object target,
+            Object[] arguments
+    ) {
+        if (method == null) throw new NullPointerException("method");
+        // The generated Talk client can refresh its certificate-derived cache
+        // after construction.  Repair it at the actual invocation boundary as
+        // well, rather than relying solely on the constructor hook.
+        normalizeLegacyTalkAuthIntegrity(method.getDeclaringClass().getClassLoader());
         try {
-            ClassLoader loader = authClient.getClass().getClassLoader();
+            return method.invoke(target, arguments);
+        } catch (java.lang.reflect.InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            // Depending on the generated DEX revision the failed integrity
+            // comparison is expressed either as divide-by-zero or throw-null.
+            if (!(cause instanceof ArithmeticException)
+                    && !(cause instanceof NullPointerException)) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(cause);
+            }
+            // The generated client can replace its static certificate cache between
+            // construction and this reflected call.  Repair that refreshed state and
+            // retry only the authentication calculation once.
+            normalizeLegacyTalkAuthIntegrity(method.getDeclaringClass().getClassLoader());
+            try {
+                return method.invoke(target, arguments);
+            } catch (java.lang.reflect.InvocationTargetException retryError) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(retryError.getCause());
+            } catch (Throwable retryError) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(retryError);
+            }
+        } catch (Throwable error) {
+            return Haiagaru.<RuntimeException, Object>throwUnchecked(error);
+        }
+    }
+
+    private static void normalizeLegacyTalkAuthIntegrity(ClassLoader loader) {
+        try {
             Class<?> stateClass = Class.forName("o.fm", false, loader);
             Field stateField = stateClass.getDeclaredField("e");
             stateField.setAccessible(true);
@@ -929,10 +1527,13 @@ public final class Haiagaru {
             expected[0] = actual[0];
 
             // The generated method refreshes this state after roughly two seconds.
-            // Hold the normalized state for the duration of the authentication call.
+            // Every wrapped call renews the cache, but other generated paths may
+            // reuse it after a day has passed. Avoid that arbitrary expiration for
+            // the lifetime of this process. Half of Long.MAX_VALUE leaves room for
+            // timestamp arithmetic in the generated method.
             Field timestampField = stateClass.getDeclaredField("c");
             timestampField.setAccessible(true);
-            timestampField.setLong(null, System.currentTimeMillis() + 86_400_000L);
+            timestampField.setLong(null, Long.MAX_VALUE / 2);
         } catch (Throwable error) {
             Log.w(LOG_TAG, "Unable to normalize legacy Talk authentication state", error);
         }
@@ -957,6 +1558,313 @@ public final class Haiagaru {
             return Haiagaru.<RuntimeException, Object>throwUnchecked(error.getCause());
         } catch (Throwable error) {
             return Haiagaru.<RuntimeException, Object>throwUnchecked(error);
+        }
+    }
+
+    /**
+     * Invokes 226's generated Talk session/key builder after repairing the same
+     * certificate-derived state used by its private string encoder.  This call
+     * runs before the posting method, so repairing only invokePreIoTalkPoster is
+     * too late: the encoder otherwise deliberately throws a bare NPE.
+     */
+    public static Object invokePreIoTalkAuthenticator(
+            java.lang.reflect.Method method,
+            Object target,
+            Object[] arguments
+    ) {
+        if (method == null) throw new NullPointerException("method");
+        normalizeGeneratedIntegrityState(target, "o.head", "e", "d");
+        try {
+            return method.invoke(target, arguments);
+        } catch (java.lang.reflect.InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (!isGeneratedIntegrityFailure(cause)) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(cause);
+            }
+            normalizeGeneratedIntegrityState(target, "o.head", "e", "d");
+            try {
+                return method.invoke(target, arguments);
+            } catch (java.lang.reflect.InvocationTargetException retryError) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(retryError.getCause());
+            } catch (Throwable retryError) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(retryError);
+            }
+        } catch (Throwable error) {
+            return Haiagaru.<RuntimeException, Object>throwUnchecked(error);
+        }
+    }
+
+    /** Compatibility wrapper for 0.8.10.241's generated Talk authenticator. */
+    public static Object invokeIoTalkPoster(
+            java.lang.reflect.Method method,
+            Object target,
+            Object[] arguments
+    ) {
+        if (method == null) throw new NullPointerException("method");
+        if ("o.setTimeUpdate".equals(method.getDeclaringClass().getName())
+                && "e".equals(method.getName())
+                && arguments != null && arguments.length == 5) {
+            try {
+                applyIoTalkPostHeaders(arguments);
+                return null;
+            } catch (Throwable error) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(error);
+            }
+        }
+        normalizeIoTalkIntegrity(method.getDeclaringClass(), target);
+        try {
+            return method.invoke(target, arguments);
+        } catch (java.lang.reflect.InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (!isGeneratedIntegrityFailure(cause)) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(cause);
+            }
+            normalizeIoTalkIntegrity(method.getDeclaringClass(), target);
+            try {
+                return method.invoke(target, arguments);
+            } catch (java.lang.reflect.InvocationTargetException retryError) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(retryError.getCause());
+            } catch (Throwable retryError) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(retryError);
+            }
+        } catch (Throwable error) {
+            return Haiagaru.<RuntimeException, Object>throwUnchecked(error);
+        }
+    }
+
+    /**
+     * Recreates 0.8.10.241's Talk authentication request without entering the
+     * generated digest routine.  That routine derives the correct HMAC but can
+     * throw a numeric integrity exception before returning it after an update.
+     */
+    public static Object invokeIoTalkAuth(
+            java.lang.reflect.Method method,
+            Object target,
+            Object[] arguments
+    ) {
+        if (method == null) throw new NullPointerException("method");
+        if ("o.setTimeUpdate".equals(method.getDeclaringClass().getName())
+                && "b".equals(method.getName())
+                && arguments != null && arguments.length == 4
+                && arguments[1] instanceof String
+                && arguments[2] instanceof String
+                && arguments[3] instanceof Number) {
+            try {
+                return requestIoTalkAuth(
+                        (String) arguments[1],
+                        (String) arguments[2],
+                        ((Number) arguments[3]).longValue());
+            } catch (Throwable error) {
+                return Haiagaru.<RuntimeException, Object>throwUnchecked(error);
+            }
+        }
+        return invokeIoTalkPoster(method, target, arguments);
+    }
+
+    private static String requestIoTalkAuth(String id, String password, long suppliedTime)
+            throws Exception {
+        // ChMate 241 passes epoch seconds here.  Do not convert the value a
+        // second time: using milliseconds-to-seconds conversion again changes
+        // the HMAC input and makes Talk reject the write token.
+        long authTime = suppliedTime;
+        String appKey = "KkaD9iXqKv9lp2luO9SuaTL8lmvRPj";
+        String digestInput = id + password + appKey + authTime;
+
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(
+                "eaGheElQLJ6QJNOKHLxWL15GvgLkVn".getBytes(StandardCharsets.UTF_8),
+                "HmacSHA256"));
+        byte[] digest = mac.doFinal(digestInput.getBytes(StandardCharsets.UTF_8));
+        StringBuilder hex = new StringBuilder(digest.length * 2);
+        for (byte item : digest) hex.append(String.format(Locale.ROOT, "%02x", item & 0xff));
+
+        String form = "ID=" + java.net.URLEncoder.encode(id, "UTF-8")
+                + "&PW=" + java.net.URLEncoder.encode(password, "UTF-8")
+                + "&KY=" + java.net.URLEncoder.encode(appKey, "UTF-8")
+                + "&CT=" + authTime
+                + "&HB=" + hex;
+        byte[] body = form.getBytes(StandardCharsets.UTF_8);
+        java.net.HttpURLConnection connection = (java.net.HttpURLConnection)
+                new java.net.URL("https://api.talk-platform.com/v1/auth/").openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(15000);
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        connection.setRequestProperty(
+                "Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+        connection.setFixedLengthStreamingMode(body.length);
+        try {
+            java.io.OutputStream output = connection.getOutputStream();
+            output.write(body);
+            output.close();
+            int status = connection.getResponseCode();
+            java.io.InputStream input = status >= 400
+                    ? connection.getErrorStream() : connection.getInputStream();
+            String response = readUtf8Response(input);
+            String firstLine = response == null ? "" : response.split("[\\r\\n]", 2)[0];
+            if (status < 200 || status >= 300 || firstLine.length() <= 26) {
+                throw new java.io.IOException(
+                        "Talk authentication failed (HTTP " + status + "): " + firstLine);
+            }
+            return firstLine.substring(26);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static String readUtf8Response(java.io.InputStream input) throws java.io.IOException {
+        if (input == null) return "";
+        java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int count;
+        try {
+            while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
+        } finally {
+            input.close();
+        }
+        return new String(output.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    /** Recreates 241's two Talk headers without entering its re-signing trap. */
+    private static void applyIoTalkPostHeaders(Object[] arguments) throws Exception {
+        Object requestBuilder = arguments[0];
+        String writeSourceKey = String.valueOf(arguments[1]);
+        String writeKey = String.valueOf(arguments[3]);
+        Object parameters = arguments[4];
+
+        java.util.HashMap<String, String> values = new java.util.HashMap<>();
+        if (parameters instanceof Iterable) {
+            for (Object entry : (Iterable<?>) parameters) {
+                if (entry == null) continue;
+                Field nameField = entry.getClass().getDeclaredField("c");
+                Field valueField = entry.getClass().getDeclaredField("a");
+                nameField.setAccessible(true);
+                valueField.setAccessible(true);
+                Object name = nameField.get(entry);
+                Object value = valueField.get(entry);
+                if (name != null) values.put(String.valueOf(name), value == null ? "" : String.valueOf(value));
+            }
+        }
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000L);
+        String payload = valueOrEmpty(values, "bbs") + "<>"
+                + valueOrEmpty(values, "key") + "<>"
+                + valueOrEmpty(values, "mail") + "<>"
+                + valueOrEmpty(values, "MESSAGE") + "<>"
+                + timestamp + "<>"
+                + writeSourceKey + "<>";
+
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(
+                "eaGheElQLJ6QJNOKHLxWL15GvgLkVn".getBytes(StandardCharsets.UTF_8),
+                "HmacSHA256"));
+        byte[] digest = mac.doFinal(payload.getBytes(StandardCharsets.UTF_8));
+        StringBuilder hex = new StringBuilder(digest.length * 2);
+        for (byte item : digest) hex.append(String.format(Locale.ROOT, "%02x", item & 0xff));
+
+        Object headerBuilder = null;
+        for (Field field : requestBuilder.getClass().getDeclaredFields()) {
+            field.setAccessible(true);
+            Object value = field.get(requestBuilder);
+            if (value != null && value.getClass().getName().contains("Headers$ComponentActivity")) {
+                headerBuilder = value;
+                break;
+            }
+        }
+        if (headerBuilder == null) throw new IllegalStateException("Talk header builder was not found");
+        Method addHeader = null;
+        for (Method candidate : headerBuilder.getClass().getDeclaredMethods()) {
+            if ("c".equals(candidate.getName())
+                    && candidate.getParameterTypes().length == 2
+                    && candidate.getParameterTypes()[0] == String.class
+                    && candidate.getParameterTypes()[1] == String.class) {
+                addHeader = candidate;
+                break;
+            }
+        }
+        if (addHeader == null) throw new IllegalStateException("Talk header method was not found");
+        addHeader.setAccessible(true);
+        addHeader.invoke(headerBuilder, "X-Write-Token", hex.toString());
+        addHeader.invoke(headerBuilder, "X-Write-Key", writeKey);
+
+        Method setParameter = parameters.getClass().getDeclaredMethod(
+                "a", String.class, String.class);
+        setParameter.setAccessible(true);
+        setParameter.invoke(parameters, "time", timestamp);
+        setParameter.invoke(parameters, "appkey", "KkaD9iXqKv9lp2luO9SuaTL8lmvRPj");
+        setParameter.invoke(parameters, "sid", writeSourceKey);
+    }
+
+    private static String valueOrEmpty(java.util.Map<String, String> values, String key) {
+        String value = values.get(key);
+        return value == null ? "" : value;
+    }
+
+    private static boolean isGeneratedIntegrityFailure(Throwable error) {
+        if (error instanceof ArithmeticException || error instanceof NullPointerException) return true;
+        if (!(error instanceof RuntimeException)) return false;
+        String message = error.getMessage();
+        return message != null && message.matches("-?\\d+");
+    }
+
+    private static void normalizeIoTalkIntegrity(Class<?> generatedClass, Object target) {
+        normalizeIntegrityFields(generatedClass, null);
+        if (target != null) normalizeIntegrityFields(target.getClass(), target);
+        ClassLoader loader = generatedClass == null ? null : generatedClass.getClassLoader();
+        normalizeIoTalkStateClass(loader, "o._JvmPlatformKt");
+        normalizeIoTalkStateClass(loader, "o.canonicalizeInternal");
+    }
+
+    private static void normalizeIoTalkStateClass(ClassLoader loader, String className) {
+        if (loader == null) return;
+        try {
+            Class<?> stateClass = Class.forName(className, false, loader);
+            for (Field field : stateClass.getDeclaredFields()) {
+                if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                        || field.getType() != Object[].class) continue;
+                field.setAccessible(true);
+                Object value = field.get(null);
+                if (!(value instanceof Object[])) continue;
+                Object[] state = (Object[]) value;
+                if (state.length < 2 || !(state[0] instanceof int[])
+                        || !(state[1] instanceof int[])) continue;
+                int[] actual = (int[]) state[0];
+                int[] expected = (int[]) state[1];
+                if (actual.length != 0 && expected.length != 0) {
+                    expected[0] = actual[0];
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to normalize ChMate 241 Talk state " + className, error);
+        }
+    }
+
+    private static void normalizeIntegrityFields(Class<?> type, Object owner) {
+        if (type == null) return;
+        try {
+            for (Field field : type.getDeclaredFields()) {
+                boolean isStatic = java.lang.reflect.Modifier.isStatic(field.getModifiers());
+                if (!isStatic && owner == null) continue;
+                field.setAccessible(true);
+                Object receiver = isStatic ? null : owner;
+                if (field.getType() == long.class && isStatic) {
+                    field.setLong(null, System.currentTimeMillis() + 86_400_000L);
+                    continue;
+                }
+                Object value = field.get(receiver);
+                if (!(value instanceof Object[])) continue;
+                Object[] state = (Object[]) value;
+                int[][] integers = new int[3][];
+                int count = 0;
+                for (Object item : state) {
+                    if (item instanceof int[] && ((int[]) item).length != 0 && count < integers.length) {
+                        integers[count++] = (int[]) item;
+                    }
+                }
+                if (count >= 2) integers[1][0] = integers[0][0];
+                if (count >= 3) integers[2][0] = -1531869433;
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to normalize ChMate 241 Talk integrity state", error);
         }
     }
 
@@ -1004,9 +1912,11 @@ public final class Haiagaru {
         boolean talkThread = ArchivedThreadImporter.isTalkThreadUrl(original);
         if (talkThread) {
             try {
-                if ("0.8.10.243 dev".equals(activity.getPackageManager()
-                        .getPackageInfo(activity.getPackageName(), 0).versionName)) {
-                    // 243 fetches inside the native download lock, including refresh.
+                String version = activity.getPackageManager()
+                        .getPackageInfo(activity.getPackageName(), 0).versionName;
+                if ("0.8.10.243 dev".equals(version)) {
+                    // 243 refreshes the first render after its native download.
+                    // 242 does not, so let the importer populate the DAT before launch.
                     return;
                 }
             } catch (android.content.pm.PackageManager.NameNotFoundException ignored) {
@@ -1102,8 +2012,23 @@ public final class Haiagaru {
                 return normalized;
             }
 
-            return "https://itest.5ch.io/test/read.cgi/"
-                    + matcher.group(1) + "/" + matcher.group(2) + "/";
+            String responseSuffix = matcher.groupCount() >= 3
+                    ? matcher.group(3) : null;
+            StringBuilder rewrittenUrl = new StringBuilder()
+                    .append("https://itest.5ch.io/test/read.cgi/")
+                    .append(matcher.group(1)).append('/').append(matcher.group(2));
+            if (responseSuffix != null && !responseSuffix.isEmpty()) {
+                rewrittenUrl.append(responseSuffix);
+            } else {
+                rewrittenUrl.append('/');
+            }
+            if (uri.getEncodedQuery() != null) {
+                rewrittenUrl.append('?').append(uri.getEncodedQuery());
+            }
+            if (uri.getEncodedFragment() != null) {
+                rewrittenUrl.append('#').append(uri.getEncodedFragment());
+            }
+            return rewrittenUrl.toString();
         } catch (Throwable error) {
             Log.w(LOG_TAG, "Unable to rewrite legacy thread URL", error);
             return normalized;
@@ -1151,12 +2076,139 @@ public final class Haiagaru {
 
     public static String normalizeBeIconUrl(String original) {
         if (original == null) return null;
-        return original.replace("://img.5ch.net/", "://img.5ch.io/");
+        return original
+                .replace("://img.5ch.net/ico/_be_", "://img.5ch.io/premium/")
+                .replace("://img.5ch.net/ico/_be", "://img.5ch.io/premium/")
+                .replace("://img.5ch.net/", "://img.5ch.io/");
+    }
+
+    /** Normalize only the retired BE token before ChMate builds its text and attachment models. */
+    public static String normalizeLegacyBeBody(String original) {
+        if (original == null || !LEGACY_BE_ANY_URL.matcher(original).find()) {
+            return original;
+        }
+        // The pre-io DAT format appears as sssp://, https://, or a control
+        // character prefix. Normalize the host in all forms before the 226
+        // response model builds its attachment projection.
+        String normalized = original
+                .replace("img.5ch.net/", "img.5ch.io/")
+                .replace("img.5ch.NET/", "img.5ch.io/");
+        // 226 builds both the response model and the attachment projection
+        // from this field. Deduplicate here as well as in the renderer so a
+        // legacy row cannot produce one inline icon plus a second attachment.
+        return deduplicateBeIcons(normalized);
     }
 
     public static String prepareLegacyBeParsing(String original) {
-        if (original == null || !original.contains("sssp://img.5ch.io/")) return original;
-        return original.replace("sssp://img.5ch.io/", "sssp://img.5ch.net/");
+        if (original == null) return null;
+        // ChMate 191 parses the same legacy row twice: once for the compact
+        // header and once for the expanded body. The expanded pass contains
+        // the complete row (including links) and would draw the BE token a
+        // second time. Keep the compact token and suppress only that repeated
+        // long-body token; ordinary short posts still use the native icon.
+        if (original.length() > 80 && LEGACY_PREMIUM_BE_URL.matcher(original).find()) {
+            original = LEGACY_PREMIUM_BE_URL.matcher(original).replaceAll("");
+        }
+        // The 191 parser only routes sssp://img.5ch.net/ico/... through its
+        // inline icon renderer. Normalize every public spelling, including
+        // ordinary https://, protocol-relative, and control-character encoded
+        // /ico/ URLs. This matters when
+        // the optional thread-date renderer inserts text before the URL: leaving
+        // the image as a normal link makes the span offsets and attachment pass
+        // disagree, which produces duplicate icons or a broken link.
+        String prepared = LEGACY_PREMIUM_BE_URL.matcher(original)
+                .replaceAll("sssp://img.5ch.net/ico/_be$1");
+        prepared = LEGACY_BE_ICO_URL.matcher(prepared)
+                .replaceAll("sssp://img.5ch.net/ico/$1");
+        return deduplicateBeIcons(prepared);
+    }
+
+    /** Keep one inline icon per BE filename even when the legacy parser visits a row twice. */
+    private static String deduplicateBeIcons(String text) {
+        Matcher matcher = LEGACY_BE_ANY_URL.matcher(text);
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        StringBuffer output = null;
+        while (matcher.find()) {
+            String key = matcher.group(1).toLowerCase(Locale.ROOT);
+            if (key.startsWith("_be_")) key = key.substring(4);
+            else if (key.startsWith("_be")) key = key.substring(3);
+            if (seen.add(key)) continue;
+            if (output == null) output = new StringBuffer(text.length());
+            matcher.appendReplacement(output, "");
+        }
+        if (output == null) return text;
+        matcher.appendTail(output);
+        return output.toString();
+    }
+
+    /** Avoid drawing the same legacy BE icon twice when the row already owns its span. */
+    public static String prepareLegacyBeParsing(Object renderBuffer, String original) {
+        if (original == null || renderBuffer == null
+                || (!LEGACY_PREMIUM_BE_URL.matcher(original).find()
+                && !LEGACY_BE_ICO_URL.matcher(original).find())) {
+            return prepareLegacyBeParsing(original);
+        }
+        String prepared = original;
+        for (Pattern tokenPattern : new Pattern[]{LEGACY_PREMIUM_BE_URL, LEGACY_BE_ICO_URL}) {
+            Matcher matcher = tokenPattern.matcher(prepared);
+            StringBuffer unique = null;
+            while (matcher.find()) {
+                if (!hasMatchingBeIconSpan(renderBuffer, matcher.group(1))) continue;
+                if (unique == null) unique = new StringBuffer(prepared.length());
+                matcher.appendReplacement(unique, "");
+            }
+            if (unique != null) {
+                matcher.appendTail(unique);
+                prepared = unique.toString();
+            }
+        }
+        return prepareLegacyBeParsing(prepared);
+    }
+
+    private static boolean hasMatchingBeIconSpan(Object renderBuffer, String fileName) {
+        String bufferClass = renderBuffer.getClass().getName();
+        String listField;
+        String spanField;
+        String iconClass;
+        String urlField;
+        if ("o.o8".equals(bufferClass)) {
+            listField = "b";
+            spanField = "d";
+            iconClass = "o.oa";
+            urlField = "e";
+        } else if ("o.getFlexLinesInternal".equals(bufferClass)) {
+            listField = "a";
+            spanField = "a";
+            iconClass = "o.getFlexDirection";
+            urlField = "b";
+        } else {
+            return false;
+        }
+        try {
+            Field recordsField = renderBuffer.getClass().getDeclaredField(listField);
+            recordsField.setAccessible(true);
+            Object records = recordsField.get(renderBuffer);
+            if (!(records instanceof List<?>)) return false;
+            String target = fileName.toLowerCase(Locale.ROOT);
+            for (Object record : (List<?>) records) {
+                if (record == null) continue;
+                Field drawableField = record.getClass().getDeclaredField(spanField);
+                drawableField.setAccessible(true);
+                Object drawable = drawableField.get(record);
+                if (drawable == null || !iconClass.equals(drawable.getClass().getName())) continue;
+                Field iconUrlField = drawable.getClass().getDeclaredField(urlField);
+                iconUrlField.setAccessible(true);
+                Object value = iconUrlField.get(drawable);
+                if (!(value instanceof String)) continue;
+                String url = ((String) value).toLowerCase(Locale.ROOT);
+                if (url.endsWith("/premium/" + target)
+                        || url.endsWith("/ico/_be" + target)
+                        || url.endsWith("/ico/_be_" + target)) return true;
+            }
+        } catch (ReflectiveOperationException | SecurityException ignored) {
+            return false;
+        }
+        return false;
     }
 
     public static String stripLegacyBeAttachmentTokens(String original) {
@@ -1176,12 +2228,52 @@ public final class Haiagaru {
         if (start >= end) return found;
 
         String candidate = text.substring(start, end).toLowerCase(Locale.ROOT);
-        if (candidate.contains("img.5ch.io/ico/")
-                || candidate.contains("img.5ch.net/ico/")) {
+        if (isBeIconUrl(candidate)) {
             linkInfo[3] = 0;
             linkInfo[5] = 4;
         }
         return found;
+    }
+
+    /**
+     * The pre-io renderer calculates an image span from the expanded sssp URL,
+     * but its displayed text still contains the shorter DAT token. A span that
+     * reaches the following newline is drawn on both lines as two BE icons.
+     */
+    public static int correctLegacyBeSpanEnd(
+            CharSequence text, Object span, int start, int end
+    ) {
+        if (text == null || span == null || start < 0 || start >= text.length()) return end;
+        int candidate = Math.min(end, text.length());
+        int newline = -1;
+        for (int i = start; i < candidate; i++) {
+            if (text.charAt(i) == '\n') {
+                newline = i;
+                break;
+            }
+        }
+        if (newline < 0 && end <= text.length()) return end;
+
+        String className = span.getClass().getName();
+        String urlField;
+        if ("o.oa".equals(className)) urlField = "e";
+        else if ("o.getFlexDirection".equals(className)) urlField = "b";
+        else return end;
+        try {
+            Field field = span.getClass().getDeclaredField(urlField);
+            field.setAccessible(true);
+            Object value = field.get(span);
+            if (!(value instanceof String)) return end;
+            String url = ((String) value).toLowerCase(Locale.ROOT);
+            if (!url.contains("img.5ch.io/premium/")
+                    && !url.contains("img.5ch.net/premium/")
+                    && !url.contains("img.5ch.io/ico/_be")
+                    && !url.contains("img.5ch.net/ico/_be")) return end;
+            int corrected = newline >= 0 ? newline : candidate;
+            return corrected > start ? corrected : end;
+        } catch (ReflectiveOperationException | SecurityException ignored) {
+            return end;
+        }
     }
 
     /**
@@ -1250,7 +2342,9 @@ public final class Haiagaru {
         if (url == null) return false;
         String normalized = url.toLowerCase(Locale.ROOT);
         return normalized.contains("img.5ch.io/ico/")
-                || normalized.contains("img.5ch.net/ico/");
+                || normalized.contains("img.5ch.net/ico/")
+                || normalized.contains("img.5ch.io/premium/")
+                || normalized.contains("img.5ch.net/premium/");
     }
 
     public static boolean is5chHost(String host) {
@@ -1301,7 +2395,15 @@ public final class Haiagaru {
             android.widget.BaseAdapter adapter,
             int position
     ) {
-        if (view == null || adapter == null || !shouldHideAds()) return;
+        if (view == null || adapter == null) return;
+        // This adapter hook runs for every bound response, including when ad
+        // hiding is disabled. Keep emoji fallback independent of that setting.
+        try {
+            EmojiFontFallback.applyToRow(view);
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to apply emoji font fallback", error);
+        }
+        if (!shouldHideAds()) return;
         try {
             // 191 reserves the tablet banner above the filter buttons as top padding on
             // the first adapter row. It is not an ad View, so collapsing SDK Views alone
@@ -1334,20 +2436,128 @@ public final class Haiagaru {
         safePostCollapseAdView(view, 2500);
     }
 
-    private static void collapseAdView(View view) {
-        collapseView(view);
-        collapseAdContainer(view);
+    /** Removes empty inline slots left between Talk response rows. */
+    public static void hideTalkThreadBlankRows(Activity activity) {
+        if (activity == null || !shouldHideAds()) return;
+        // This hook is installed on ResListActivity, which is also used for
+        // ordinary 5ch threads.  Their response container can still be empty
+        // while the first network load is in progress.  Treating that
+        // container as an ad slot hides the whole thread on its first open.
+        Intent intent = activity.getIntent();
+        if (intent == null || intent.getData() == null
+                || !ArchivedThreadImporter.isTalkThreadUrl(intent.getData().toString())) {
+            return;
+        }
+        View root = activity.getWindow() == null
+                ? null : activity.getWindow().getDecorView();
+        if (!(root instanceof ViewGroup)) return;
+        ViewGroup group = (ViewGroup) root;
+        Runnable scan = () -> collapseTalkBlankRows(group);
+        group.post(scan);
+        group.postDelayed(scan, 300);
+        group.postDelayed(scan, 1000);
+        group.postDelayed(scan, 2500);
     }
 
-    private static void collapseAdContainer(View adView) {
-        if (!(adView.getParent() instanceof ViewGroup)) return;
-
-        ViewGroup container = (ViewGroup) adView.getParent();
-        // The tablet thread layout reserves a fixed-height wrapper for the banner. Collapse
-        // only a wrapper whose sole child is the ad, leaving normal content containers intact.
-        if (container.getChildCount() == 1 && container.getChildAt(0) == adView) {
-            collapseView(container);
+    private static void collapseTalkBlankRows(View view) {
+        if (!(view instanceof ViewGroup)) return;
+        ViewGroup group = (ViewGroup) view;
+        String name = group.getClass().getName();
+        // ChMate 242 uses a dedicated empty, childless view as the large inline
+        // Talk ad slot between consecutive responses. Identify that class by
+        // name, while still requiring the Talk thread guard in the caller.
+        if ("o.zzbiczzabzza".equals(name)
+                && view.getVisibility() == View.VISIBLE
+                && view.getHeight() >= dp(view.getContext(), 160)) {
+            collapseView(view);
+            return;
         }
+        if (name.contains("RecyclerView") || name.contains("AbsListView")
+                || name.contains("ScrollView")) {
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collapseTalkBlankRows(group.getChildAt(i));
+            }
+            return;
+        }
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            // 0.8.10.241 leaves its inline-ad slot as a large childless
+            // ViewGroup. Do not recursively classify arbitrary UI containers as
+            // empty here: ChMate's bottom bar uses custom-drawn Views that have
+            // no text/background and would otherwise be mistaken for spacers.
+            if (child.getVisibility() == View.VISIBLE
+                    && child instanceof ViewGroup
+                    && ((ViewGroup) child).getChildCount() == 0
+                    && child.getHeight() >= dp(child.getContext(), 160)) {
+                collapseView(child);
+                continue;
+            }
+            collapseTalkBlankRows(child);
+        }
+    }
+
+    private static void collapseAdView(View view) {
+        boolean wasLaidOut = view != null && view.getHeight() > 0;
+        collapseView(view);
+        collapseAdContainer(view, wasLaidOut);
+    }
+
+    private static void collapseAdContainer(View adView, boolean wasLaidOut) {
+        // onViewCreated can reach the ad before measure/layout. At that point every
+        // sibling also has height 0; walking upward would incorrectly collapse the
+        // whole HomeActivity root and leave a black screen on launch.
+        if (adView == null || !wasLaidOut) return;
+        View current = adView;
+        // Talk's inline slot is sometimes wrapped in a FrameLayout containing a second,
+        // already-empty spacer. The old sole-child check left that wrapper at its reserved
+        // height, producing a large blank row between two responses. Walk only the small
+        // wrapper chain and collapse a parent after every child has become empty or hidden.
+        for (int depth = 0; depth < 4 && current.getParent() instanceof ViewGroup; depth++) {
+            ViewGroup container = (ViewGroup) current.getParent();
+            String name = container.getClass().getName();
+            if (name.contains("RecyclerView") || name.contains("AbsListView")
+                    || name.contains("ScrollView")) {
+                return;
+            }
+            boolean hasVisibleChild = false;
+            for (int i = 0; i < container.getChildCount(); i++) {
+                View child = container.getChildAt(i);
+                if (child.getVisibility() == View.VISIBLE && child.getHeight() > 0
+                        && !isEmptySpacer(child)) {
+                    hasVisibleChild = true;
+                    break;
+                }
+            }
+            if (hasVisibleChild) return;
+            collapseView(container);
+            current = container;
+        }
+    }
+
+    private static boolean isEmptySpacer(View view) {
+        if (view == null || view.getVisibility() != View.VISIBLE || view.getHeight() <= 0) {
+            return true;
+        }
+        if (view instanceof TextView) {
+            CharSequence text = ((TextView) view).getText();
+            return (text == null || text.length() == 0)
+                    && view.getBackground() == null;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            // Talk 241 places the inline ad in a childless FrameLayout. The SDK
+            // background remains attached even after the ad has no content, so
+            // background presence alone cannot make this a non-empty row.
+            if (group.getChildCount() == 0
+                    && view.getHeight() >= dp(view.getContext(), 160)) {
+                return true;
+            }
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (!isEmptySpacer(group.getChildAt(i))) return false;
+            }
+            return view.getBackground() == null;
+        }
+        return view.getBackground() == null;
     }
 
     private static void collapseView(View view) {
@@ -1525,8 +2735,6 @@ public final class Haiagaru {
         int padding = dp(activity, 20);
         layout.setPadding(padding, padding, padding, padding);
 
-        ProgrammableNg.addSettingsButton(layout, activity);
-
         Switch hideAd = addSwitch(
                 layout,
                 activity,
@@ -1583,6 +2791,63 @@ public final class Haiagaru {
                 "chtoio",
                 preferences.getBoolean("chtoio", true)
         );
+        Spinner hissiCheckerMode = addSpinner(
+                layout,
+                activity,
+                text("ID長押しの必死チェッカー", "ID long-press checker"),
+                new String[]{
+                        text("自動（5chはhissi.org／外部板はKyodemo）", "Automatic (hissi.org for 5ch, Kyodemo for external boards)"),
+                        text("hissi.orgを使用", "Use hissi.org"),
+                        text("Kyodemoを使用", "Use Kyodemo"),
+                        text("両方（画面上で切り替え）", "Both (switch on the checker screen)")
+                },
+                preferences.getInt(HISSI_CHECKER_MODE_KEY, 0)
+        );
+        Spinner hissiViewerTheme = addSpinner(
+                layout,
+                activity,
+                text("必死チェッカーの表示テーマ", "Checker viewer theme"),
+                new String[]{
+                        text("端末設定に合わせる", "Follow system"),
+                        text("ダーク", "Dark"),
+                        text("AMOLEDブラック", "AMOLED black"),
+                        text("ライト", "Light")
+                },
+                preferences.getInt(HISSI_VIEWER_THEME_KEY, 0)
+        );
+        Spinner hissiViewerTextZoom = addSpinner(
+                layout,
+                activity,
+                text("必死チェッカーの文字サイズ", "Checker viewer text size"),
+                new String[]{"100%", "115%", "130%"},
+                viewerTextZoomIndex(preferences.getInt(HISSI_VIEWER_TEXT_ZOOM_KEY, 100))
+        );
+        Switch hissiViewerFullscreen = addSwitch(
+                layout,
+                activity,
+                text("必死チェッカーを全画面で表示", "Fullscreen checker viewer"),
+                preferences.getBoolean(HISSI_VIEWER_FULLSCREEN_KEY, false)
+        );
+        Spinner hissiViewerSwipeHistory = addSpinner(
+                layout,
+                activity,
+                text("専用ビュワーの左右スワイプ", "Viewer horizontal swipe"),
+                new String[]{"無効", "左で戻る／右で進む", "左で進む／右で戻る"},
+                Math.max(0, Math.min(2, preferences.getInt(HISSI_VIEWER_SWIPE_HISTORY_KEY, 0)))
+        );
+        Switch kyodemoEnhancedViewer = addSwitch(
+                layout,
+                activity,
+                text("KyodemoのID/ﾜｯﾁｮｲ検索を専用表示", "Enhanced Kyodemo ID/Wacchoi viewer"),
+                preferences.getBoolean(KYODEMO_ENHANCED_VIEWER_KEY, false)
+        );
+        Switch compactFilters = null;
+        if (QuickFilterToolbar.supported(activity)) {
+            compactFilters = addSwitch(layout, activity,
+                    "スレのツールバーに「フィルタ」を追加する（191 dev／242 devでは旧フィルタ行も非表示。ON後、ツールバー設定で追加してスレを開き直してください）",
+                    preferences.getBoolean("compactQuickFilters", false));
+        }
+        final Switch compactQuickFiltersSwitch = compactFilters;
         Switch edgeReporterId = addSwitch(
                 layout,
                 activity,
@@ -1608,9 +2873,81 @@ public final class Haiagaru {
                 text("自動DAT取得", "Automatic DAT retrieval"),
                 preferences.getBoolean("automaticDat", true)
         );
+        Switch refreshCellularNetwork = addSwitch(
+                layout,
+                activity,
+                text("投稿時にモバイル回線を再取得する", "Refresh the cellular network before posting"),
+                preferences.getBoolean("refreshCellularNetwork", true)
+        );
+        TextView refreshCellularNetworkDescription = new TextView(activity);
+        refreshCellularNetworkDescription.setText(text(
+                "ON（推奨）では、古いNetwork IDを使わず投稿前にセルラー回線を再要求します。"
+                        + " OFFにするとChMate本来の接続選択へ戻ります。",
+                "ON (recommended) requests a fresh cellular network before posting instead of reusing "
+                        + "a stale Network ID. OFF restores ChMate's original selection."
+        ));
+        refreshCellularNetworkDescription.setTextSize(13);
+        layout.addView(refreshCellularNetworkDescription, rowParams(activity));
+        Switch bypassPostPreflight = addSwitch(
+                layout,
+                activity,
+                text("投稿前の本文チェックを無効化",
+                        "Disable the local post body check"),
+                preferences.getBoolean("bypassPostPreflight", true)
+        );
+        TextView bypassPostPreflightDescription = new TextView(activity);
+        bypassPostPreflightDescription.setText(text(
+                "ONにすると、空欄・端末情報のみかどうかの判定を投稿先サーバーに任せます。"
+                        + " 誤判定される場合はON、ChMate本来の確認を使う場合はOFFにしてください。",
+                "When enabled, empty-body and device-info-only validation is left to the server. "
+                        + "Enable this if ChMate rejects non-empty text; disable it to restore ChMate's check."
+        ));
+        bypassPostPreflightDescription.setTextSize(13);
+        layout.addView(bypassPostPreflightDescription, rowParams(activity));
 
         final SharedPreferences chMatePreferences =
                 PreferenceManager.getDefaultSharedPreferences(activity);
+        EditText postDataListCount = addTextField(
+                layout,
+                activity,
+                text("書き込み履歴に残す件数（0で残さない）",
+                        "Posts to keep in post history (0 keeps none)"),
+                Integer.toString(chMatePreferences.getInt(
+                        CHMATE_POST_DATA_LIST_COUNT_KEY,
+                        DEFAULT_CHMATE_POST_DATA_LIST_COUNT
+                ))
+        );
+        TextView postDataListCountDescription = new TextView(activity);
+        postDataListCountDescription.setText(text(
+                "書き込み履歴の古い項目から削除します。設定変更時にもすぐ整理されます。"
+                        + " 1〜10000、または0を指定できます。",
+                "Oldest post-history entries are removed first, including immediately after changing "
+                        + "this setting. Choose 0 to 10000."
+        ));
+        postDataListCountDescription.setTextSize(13);
+        layout.addView(postDataListCountDescription, rowParams(activity));
+
+        EditText ngRegistrationLimit = addTextField(
+                layout,
+                activity,
+                text("NG登録上限（ワード・ID・名前など、0で無制限）",
+                        "NG registration limit (words, IDs, names; 0 is unlimited)"),
+                Integer.toString(preferences.getInt(
+                        NG_REGISTRATION_LIMIT_KEY,
+                        DEFAULT_NG_REGISTRATION_LIMIT
+                ))
+        );
+        TextView ngRegistrationLimitDescription = new TextView(activity);
+        ngRegistrationLimitDescription.setText(text(
+                "NGワード・NG ID・NG名前など、各NG保存カテゴリの上限です。"
+                        + "上限を下げても既存項目はその場で削除せず、次回保存時に古い項目から整理します。"
+                        + "1〜100000、または0（無制限）を指定できます。",
+                "Sets the per-category limit for NG words, IDs, names, and similar entries. "
+                        + "Lowering the value does not delete existing entries immediately; older entries "
+                        + "are trimmed on the next save. Choose 1 to 100000, or 0 for unlimited."
+        ));
+        ngRegistrationLimitDescription.setTextSize(13);
+        layout.addView(ngRegistrationLimitDescription, rowParams(activity));
 
         boolean legacyPlusSupportedValue = false;
         Switch abbrevSingleIdValue = null;
@@ -1674,6 +3011,10 @@ public final class Haiagaru {
         }
         final EditText archiveRouteTemplates = archiveRouteTemplatesValue;
         addOptionalSettingsSection(
+                "Edge archive search",
+                () -> addEddiArchiveSearchControl(activity, layout)
+        );
+        addOptionalSettingsSection(
                 "archived-thread preset",
                 () -> addArchiveSearchPresetControl(activity, layout)
         );
@@ -1684,6 +3025,18 @@ public final class Haiagaru {
         addOptionalSettingsSection(
                 "duplicate board cleanup",
                 () -> addBoardDuplicateCleanupControl(activity, layout)
+        );
+        addOptionalSettingsSection(
+                "programmable NG",
+                () -> ProgrammableNgController.addSettingsButton(layout, activity)
+        );
+        addOptionalSettingsSection(
+                "legacy programmable NG",
+                () -> ProgrammableNg.addSettingsButton(layout, activity)
+        );
+        addOptionalSettingsSection(
+                "MEGA backup",
+                () -> HaiagaruMegaSync.addSettingsButton(layout, activity)
         );
 
         ScrollView scrollView = new ScrollView(activity);
@@ -1698,6 +3051,14 @@ public final class Haiagaru {
                     boolean legacyPlusChanged = false;
                     if (legacyPlusSupported) {
                         SharedPreferences.Editor chMateEditor = chMatePreferences.edit();
+                        int postHistoryCount = parsePostHistoryCount(
+                                value(postDataListCount),
+                                chMatePreferences.getInt(
+                                        CHMATE_POST_DATA_LIST_COUNT_KEY,
+                                        DEFAULT_CHMATE_POST_DATA_LIST_COUNT
+                                )
+                        );
+                        chMateEditor.putInt(CHMATE_POST_DATA_LIST_COUNT_KEY, postHistoryCount);
                         if (abbrevSingleId != null) {
                             boolean checked = abbrevSingleId.isChecked();
                             legacyPlusChanged |= checked != chMatePreferences.getBoolean(
@@ -1737,6 +3098,17 @@ public final class Haiagaru {
                             }
                         }
                         chMateEditor.commit();
+                    } else {
+                        int postHistoryCount = parsePostHistoryCount(
+                                value(postDataListCount),
+                                chMatePreferences.getInt(
+                                        CHMATE_POST_DATA_LIST_COUNT_KEY,
+                                        DEFAULT_CHMATE_POST_DATA_LIST_COUNT
+                                )
+                        );
+                        chMatePreferences.edit()
+                                .putInt(CHMATE_POST_DATA_LIST_COUNT_KEY, postHistoryCount)
+                                .commit();
                     }
                     preferences.edit()
                             .putBoolean("hideAd", hideAd.isChecked())
@@ -1748,9 +3120,30 @@ public final class Haiagaru {
                             .putString("prefMonaKeyName", value(monaKeyName))
                             .putString("adClass", value(adClass).trim())
                             .putBoolean("chtoio", chtoio.isChecked())
+                            .putInt(HISSI_CHECKER_MODE_KEY, hissiCheckerMode.getSelectedItemPosition())
+                            .putInt(HISSI_VIEWER_THEME_KEY, hissiViewerTheme.getSelectedItemPosition())
+                            .putInt(HISSI_VIEWER_TEXT_ZOOM_KEY, new int[]{100, 115, 130}[
+                                    Math.max(0, Math.min(2, hissiViewerTextZoom.getSelectedItemPosition()))
+                            ])
+                            .putBoolean(HISSI_VIEWER_FULLSCREEN_KEY, hissiViewerFullscreen.isChecked())
+                            .putInt(HISSI_VIEWER_SWIPE_HISTORY_KEY, hissiViewerSwipeHistory.getSelectedItemPosition())
+                            .putBoolean(KYODEMO_ENHANCED_VIEWER_KEY, kyodemoEnhancedViewer.isChecked())
+                            .putBoolean("compactQuickFilters", compactQuickFiltersSwitch != null && compactQuickFiltersSwitch.isChecked())
                             .putBoolean("edgeReporterId", edgeReporterId.isChecked())
                             .putBoolean("forceHttps", forceHttps.isChecked())
                             .putBoolean("automaticDat", automaticDat.isChecked())
+                            .putBoolean("refreshCellularNetwork", refreshCellularNetwork.isChecked())
+                            .putBoolean("bypassPostPreflight", bypassPostPreflight.isChecked())
+                            .putInt(
+                                    NG_REGISTRATION_LIMIT_KEY,
+                                    parseNgRegistrationLimit(
+                                            value(ngRegistrationLimit),
+                                            preferences.getInt(
+                                                    NG_REGISTRATION_LIMIT_KEY,
+                                                    DEFAULT_NG_REGISTRATION_LIMIT
+                                            )
+                                    )
+                            )
                             .commit();
                     if (archiveRouteTemplates != null) {
                         preferences.edit()
@@ -1814,6 +3207,19 @@ public final class Haiagaru {
         reset.setOnClickListener(view -> editor.setText(DEFAULT_ARCHIVE_ROUTE_TEMPLATES));
         layout.addView(reset, rowParams(activity));
         return editor;
+    }
+
+    private static void addEddiArchiveSearchControl(Activity activity, LinearLayout layout) {
+        Button button = new Button(activity);
+        button.setAllCaps(false);
+        button.setText(text("エッヂの過去ログを検索", "Search archived Edge threads"));
+        button.setOnClickListener(view -> {
+            Intent intent = new Intent(activity, HissiMenuActivity.class);
+            intent.setAction(Intent.ACTION_VIEW);
+            intent.setData(Uri.parse("https://eddiarchive3rd.boy.jp/"));
+            activity.startActivity(intent);
+        });
+        layout.addView(button, rowParams(activity));
     }
 
     private static void addArchiveSearchPresetControl(Activity activity, LinearLayout layout) {
@@ -2205,6 +3611,12 @@ public final class Haiagaru {
         return preferences(context).getBoolean("automaticDat", true);
     }
 
+    /** Whether ChMate's local empty/device-info-only post gate should be skipped. */
+    public static boolean bypassPostPreflightValidation() {
+        SharedPreferences preferences = preferencesOrNull();
+        return preferences == null || preferences.getBoolean("bypassPostPreflight", true);
+    }
+
     static String archiveRouteTemplates(Context context) {
         if (context == null) return DEFAULT_ARCHIVE_ROUTE_TEMPLATES;
         String configured = preferences(context).getString(
@@ -2256,6 +3668,7 @@ public final class Haiagaru {
         // obfuscated defaults; an explicitly entered custom class is preserved verbatim.
         if ((AD_CLASS_191.equals(savedClass)
                 || AD_CLASS_241.equals(savedClass)
+                || AD_CLASS_242.equals(savedClass)
                 || AD_CLASS_243.equals(savedClass))
                 && !classExists(savedClass)) {
             return defaultAdClass();
@@ -2273,6 +3686,7 @@ public final class Haiagaru {
             String versionName = packageInfo.versionName;
             return "0.8.10.191 dev".equals(versionName)
                     || "0.8.10.226 dev".equals(versionName)
+                    || "0.8.10.242 dev".equals(versionName)
                     || "0.8.10.243 dev".equals(versionName);
         } catch (Throwable error) {
             Log.w(LOG_TAG, "Unable to determine ChMate version for compatibility controls", error);
@@ -2282,6 +3696,7 @@ public final class Haiagaru {
 
     private static String defaultAdClass() {
         if (classExists(AD_CLASS_243)) return AD_CLASS_243;
+        if (classExists(AD_CLASS_242)) return AD_CLASS_242;
         if (classExists(AD_CLASS_241)) return AD_CLASS_241;
         return AD_CLASS_191;
     }
@@ -2326,6 +3741,24 @@ public final class Haiagaru {
         return editText;
     }
 
+    private static Spinner addSpinner(
+            LinearLayout layout,
+            Context context,
+            String title,
+            String[] values,
+            int selected
+    ) {
+        TextView label = new TextView(context);
+        label.setText(title);
+        layout.addView(label, rowParams(context));
+        Spinner spinner = new Spinner(context);
+        spinner.setAdapter(new ArrayAdapter<>(context,
+                android.R.layout.simple_spinner_dropdown_item, values));
+        spinner.setSelection(Math.max(0, Math.min(selected, values.length - 1)));
+        layout.addView(spinner, rowParams(context));
+        return spinner;
+    }
+
     private static LinearLayout.LayoutParams rowParams(Context context) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2366,6 +3799,24 @@ public final class Haiagaru {
         return editText.getText() == null ? "" : editText.getText().toString();
     }
 
+    private static int parsePostHistoryCount(String rawValue, int fallback) {
+        try {
+            int value = Integer.parseInt(rawValue.trim());
+            if (value >= 0 && value <= MAX_CHMATE_POST_DATA_LIST_COUNT) return value;
+        } catch (RuntimeException ignored) {
+        }
+        return Math.max(0, Math.min(fallback, MAX_CHMATE_POST_DATA_LIST_COUNT));
+    }
+
+    private static int parseNgRegistrationLimit(String rawValue, int fallback) {
+        try {
+            int value = Integer.parseInt(rawValue.trim());
+            if (value >= 0 && value <= MAX_NG_REGISTRATION_LIMIT) return value;
+        } catch (RuntimeException ignored) {
+        }
+        return Math.max(0, Math.min(fallback, MAX_NG_REGISTRATION_LIMIT));
+    }
+
     private static String text(String japanese, String english) {
         return Locale.JAPANESE.getLanguage().equals(Locale.getDefault().getLanguage())
                 ? japanese
@@ -2381,6 +3832,80 @@ public final class Haiagaru {
         return context == null ? null : preferences(context);
     }
 
+    /** 0=automatic, 1=hissi.org, 2=Kyodemo, 3=both. Shared by all supported ChMate versions. */
+    public static int hissiCheckerMode() {
+        SharedPreferences prefs = preferencesOrNull();
+        if (prefs == null) return 0;
+        int mode = prefs.getInt(HISSI_CHECKER_MODE_KEY, 0);
+        return mode < 0 || mode > 3 ? 0 : mode;
+    }
+
+    /** Returns whether the patch-time dedicated checker Activity was registered. */
+    public static boolean dedicatedCheckerViewerAvailable() {
+        Context context = applicationContext;
+        if (context == null) return false;
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("haiagaru-hissi://hissi.org/read.php/test/1/1.html"));
+            intent.setPackage(context.getPackageName());
+            return context.getPackageManager().resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null;
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to detect the dedicated checker viewer", error);
+            return false;
+        }
+    }
+
+    static Context applicationContextForExtension() {
+        return applicationContext;
+    }
+
+    public static int hissiViewerTheme() {
+        SharedPreferences prefs = preferencesOrNull();
+        if (prefs == null) return 0;
+        int value = prefs.getInt(HISSI_VIEWER_THEME_KEY, 0);
+        return value < 0 || value > 3 ? 0 : value;
+    }
+
+    public static void setHissiViewerTheme(int value) {
+        SharedPreferences prefs = preferencesOrNull();
+        if (prefs != null) prefs.edit().putInt(HISSI_VIEWER_THEME_KEY,
+                Math.max(0, Math.min(3, value))).apply();
+    }
+
+    public static int hissiViewerTextZoom() {
+        SharedPreferences prefs = preferencesOrNull();
+        if (prefs == null) return 100;
+        int value = prefs.getInt(HISSI_VIEWER_TEXT_ZOOM_KEY, 100);
+        return value == 115 || value == 130 ? value : 100;
+    }
+
+    public static void setHissiViewerTextZoom(int value) {
+        SharedPreferences prefs = preferencesOrNull();
+        int zoom = value == 115 || value == 130 ? value : 100;
+        if (prefs != null) prefs.edit().putInt(HISSI_VIEWER_TEXT_ZOOM_KEY, zoom).apply();
+    }
+
+    public static boolean hissiViewerFullscreen() {
+        SharedPreferences prefs = preferencesOrNull();
+        return prefs != null && prefs.getBoolean(HISSI_VIEWER_FULLSCREEN_KEY, false);
+    }
+
+    public static int hissiViewerSwipeHistory() {
+        SharedPreferences prefs = preferencesOrNull();
+        if (prefs == null) return 0;
+        int direction = prefs.getInt(HISSI_VIEWER_SWIPE_HISTORY_KEY, 0);
+        return direction >= 0 && direction <= 2 ? direction : 0;
+    }
+
+    public static boolean kyodemoEnhancedViewer() {
+        SharedPreferences prefs = preferencesOrNull();
+        return prefs != null && prefs.getBoolean(KYODEMO_ENHANCED_VIEWER_KEY, false);
+    }
+
+    private static int viewerTextZoomIndex(int zoom) {
+        return zoom == 115 ? 1 : zoom == 130 ? 2 : 0;
+    }
+
     private static final class ConfigSnapshot {
         final boolean hideAd;
         final boolean replaceUserAgent;
@@ -2394,6 +3919,7 @@ public final class Haiagaru {
         final boolean edgeReporterId;
         final boolean forceHttps;
         final boolean automaticDat;
+        final boolean refreshCellularNetwork;
         final String archiveRouteTemplates;
 
         private ConfigSnapshot(
@@ -2409,6 +3935,7 @@ public final class Haiagaru {
                 boolean edgeReporterId,
                 boolean forceHttps,
                 boolean automaticDat,
+                boolean refreshCellularNetwork,
                 String archiveRouteTemplates
         ) {
             this.hideAd = hideAd;
@@ -2423,6 +3950,7 @@ public final class Haiagaru {
             this.edgeReporterId = edgeReporterId;
             this.forceHttps = forceHttps;
             this.automaticDat = automaticDat;
+            this.refreshCellularNetwork = refreshCellularNetwork;
             this.archiveRouteTemplates = archiveRouteTemplates;
         }
 
@@ -2440,6 +3968,7 @@ public final class Haiagaru {
                     preferences.getBoolean("edgeReporterId", true),
                     preferences.getBoolean("forceHttps", false),
                     preferences.getBoolean("automaticDat", true),
+                    preferences.getBoolean("refreshCellularNetwork", true),
                     preferences.getString(
                             ARCHIVE_ROUTE_TEMPLATES_KEY,
                             DEFAULT_ARCHIVE_ROUTE_TEMPLATES
@@ -2458,6 +3987,7 @@ public final class Haiagaru {
                     && edgeReporterId == value.edgeReporterId
                     && forceHttps == value.forceHttps
                     && automaticDat == value.automaticDat
+                    && refreshCellularNetwork == value.refreshCellularNetwork
                     && equal(userAgent, value.userAgent)
                     && equal(cookieClass, value.cookieClass)
                     && equal(monaKeyFile, value.monaKeyFile)

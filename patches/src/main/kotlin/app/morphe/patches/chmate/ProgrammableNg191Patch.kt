@@ -13,7 +13,7 @@ private const val THREAD_FRAGMENT = "Lo/r8lambdaGCnF6WpW_bFarRe7yCX2B6KzQ;"
 private const val RESPONSE_ADAPTER = "Lo/m9ExternalSyntheticLambda1;"
 
 /** Exact 191 dev hooks. Refuse to patch if the supplied APK differs. */
-internal fun BytecodePatchContext.patchProgrammableNg191() {
+internal fun BytecodePatchContext.patchLegacyProgrammableNg191() {
     check(packageMetadata.versionName == "0.8.10.191 dev")
     val titleFilter = mutableClassDefBy(THREAD_FRAGMENT).methods.single {
         it.name == "c" && it.returnType == "Ljava/util/ArrayList;" &&
